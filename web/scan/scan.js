@@ -88,6 +88,20 @@ let hitSources = [];
 let depthOn = false;
 
 
+// three.js (r170) sees 'depth-sensing' in enabledFeatures and calls the GPU depth API every
+// frame. We use the CPU path, where that call throws InvalidStateError, which kills three's
+// frame loop before our callback runs (the S23 "froze" ~0.5 s in). Report "no GPU depth" instead.
+if (window.XRWebGLBinding?.prototype.getDepthInformation) {
+  const gpuDepth = XRWebGLBinding.prototype.getDepthInformation;
+  XRWebGLBinding.prototype.getDepthInformation = function (view) {
+    try {
+      return gpuDepth.call(this, view);
+    } catch {
+      return null;
+    }
+  };
+}
+
 // ---- three.js (only needed to drive the XR frame loop + show coverage dots) ----
 // Created on first Start so a WebGL failure can't break the page before it can explain itself.
 let renderer = null;
