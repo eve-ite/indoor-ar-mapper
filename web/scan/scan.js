@@ -24,6 +24,10 @@ const params = new URLSearchParams(location.search);
 // Optional upload base URL for when the pages are hosted separately from the server.
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
 let DEVICE = params.get('device') || 'unknown';
+// Depth lidar is opt-in (?depth=1): with it on, the S23 froze before recording a frame.
+const DEPTH_REQUESTED = params.get('depth') === '1';
+const DEPTH_EVERY = 2; // sample depth on every Nth recorded frame (5 Hz)
+const DEPTH_MAX_MS = 25; // pause depth sampling if it averages slower than this
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -139,8 +143,8 @@ function renderStatus() {
     `REC ${rec.header.session_id}  ${elapsed}s\n` +
     `tracking ${trackingState}  ${Math.round(rec.fps)} fps\n` +
     (depthOn
-      ? `depth ON  ${rec.depthFrames}/${rec.frames} frames  ${rec.depthPoints} pts\n`
-      : `depth off (planes only)\n`) +
+      ? `depth ${rec.depthPaused ? 'PAUSED (too slow)' : 'ON'}  ${rec.depthMs.toFixed(1)} ms  ${rec.depthPoints} pts\n`
+      : `depth off${DEPTH_REQUESTED ? ' (not granted)' : ''}\n`) +
     `frames ${rec.frames}  points ${rec.points}  hit ${hitPct}%\n` +
     `per-ray % ${perRay}\n` +
     `saved ${rec.savedFrames}/${rec.frames}`;
@@ -158,17 +162,19 @@ async function startScan() {
       optionalFeatures: ['dom-overlay'],
       domOverlay: { root: overlayRoot },
     };
-    try {
-      // Depth is optional: CPU path only (the GPU sample's shader failed on the S23).
-      session = await navigator.xr.requestSession('immersive-ar', {
-        ...base,
-        optionalFeatures: [...base.optionalFeatures, 'depth-sensing'],
-        depthSensing: { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] },
-      });
-    } catch (err) {
-      console.warn('depth session failed, retrying without depth:', err);
-      session = await navigator.xr.requestSession('immersive-ar', base);
+    if (DEPTH_REQUESTED) {
+      try {
+        // CPU path only (the GPU sample's shader failed on the S23).
+        session = await navigator.xr.requestSession('immersive-ar', {
+          ...base,
+          optionalFeatures: [...base.optionalFeatures, 'depth-sensing'],
+          depthSensing: { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] },
+        });
+      } catch (err) {
+        console.warn('depth session failed, retrying without depth:', err);
+      }
     }
+    if (!session) session = await navigator.xr.requestSession('immersive-ar', base);
   } catch (err) {
     say(`Could not start AR: ${err.message}`, 'bad');
     ui.start.disabled = false;
@@ -183,7 +189,11 @@ async function startScan() {
   session.addEventListener('end', onSessionEnd);
   await renderer.xr.setSession(session);
 
-  depthOn = session.depthUsage === 'cpu-optimized';
+  // depthUsage throws (InvalidStateError) when depth-sensing wasn't granted.
+  depthOn = false;
+  try {
+    depthOn = DEPTH_REQUESTED && session.depthUsage === 'cpu-optimized';
+  } catch {}
 
   const viewerSpace = await session.requestReferenceSpace('viewer');
   const rays = fanRays();
@@ -229,6 +239,8 @@ async function startScan() {
     lastObstacleT: 0,
     depthFrames: 0,
     depthPoints: 0,
+    depthMs: 0,
+    depthPaused: false,
     fps: 0,
     lastFrameTime: null,
     recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
@@ -282,7 +294,14 @@ function onXRFrame(time, frame) {
   });
   rec.rayTries += hitSources.length;
 
-  const dpts = depthOn ? sampleDepth(frame, pose.views[0]) : null;
+  let dpts = null;
+  if (depthOn && !rec.depthPaused && rec.frames % DEPTH_EVERY === 0) {
+    const t0 = performance.now();
+    dpts = sampleDepth(frame, pose.views[0]);
+    const ms = performance.now() - t0;
+    rec.depthMs = rec.depthMs ? rec.depthMs + 0.2 * (ms - rec.depthMs) : ms;
+    if (rec.depthMs > DEPTH_MAX_MS) rec.depthPaused = true;
+  }
   if (dpts) {
     rec.depthFrames++;
     rec.depthPoints += dpts.length;
@@ -479,7 +498,13 @@ async function refreshSaved() {
 }
 
 // ---- wiring ----
-ui.start.onclick = startScan;
+// An error after the session starts would leave a frozen AR view with no frame loop.
+ui.start.onclick = () =>
+  startScan().catch((err) => {
+    console.error(err);
+    session?.end();
+    say(`Start failed: ${err.message}`, 'bad');
+  });
 ui.stop.onclick = stopScan;
 ui.download.onclick = () => lastScan && downloadText(lastScan.id, lastScan.text);
 ui.upload.onclick = () => lastScan && uploadText(lastScan.id, lastScan.text);
