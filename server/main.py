@@ -87,6 +87,24 @@ def get_scan(scan_id: str):
     return FileResponse(path, media_type="application/x-ndjson")
 
 
+CAMTEST_DIR = SCANS_DIR / "camtest"
+SAFE_FILE = re.compile(r"^[A-Za-z0-9_-]{1,64}\.(json|jpg)$")
+
+
+@app.put("/api/camtest/{run_id}/{name}")
+async def put_camtest(run_id: str, name: str, request: Request):
+    """Textures exploration: /camtest/ page results (report.json + keyframe JPEGs)."""
+    if not SAFE_ID.match(run_id) or not SAFE_FILE.match(name):
+        raise HTTPException(400, "bad name")
+    body = await request.body()
+    if len(body) > 20 * 1024 * 1024:
+        raise HTTPException(413, "too large")
+    folder = CAMTEST_DIR / run_id
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(body)
+    return {"saved": f"{run_id}/{name}", "bytes": len(body)}
+
+
 # M3: WebSocket relay for car drive commands goes here (ESP32 dials out to the tunnel via wss://).
 
 

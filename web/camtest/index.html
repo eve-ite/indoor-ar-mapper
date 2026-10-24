@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Camera Test</title>
+  <style>
+    :root {
+      --bg: #101418;
+      --fg: #eef2f5;
+      --muted: #9aa7b2;
+      --accent: #2bc4a8;
+      --warn: #f2b84b;
+      --bad: #ef6b6b;
+      --btn: #222a31;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body { background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, -apple-system, Roboto, sans-serif; }
+    body.in-ar { background: transparent; }
+    #overlay { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    h1 { font-size: 19px; margin: 0; }
+    p.note { color: var(--muted); font-size: 13px; margin: 0; }
+    #checks { list-style: none; margin: 0; padding: 10px 12px; border-radius: 12px; background: rgba(0, 0, 0, 0.6); display: grid; gap: 4px; }
+    #checks li { display: grid; grid-template-columns: 22px 1fr; gap: 6px; font-size: 14px; }
+    #checks .d { grid-column: 2; color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-word; }
+    .pass .i { color: var(--accent); }
+    .fail .i { color: var(--bad); }
+    .warn .i { color: var(--warn); }
+    .pending .i { color: var(--muted); }
+    #live { font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; background: rgba(0, 0, 0, 0.6); border-radius: 10px; padding: 8px 10px; white-space: pre-wrap; }
+    .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button {
+      font: 600 17px system-ui, sans-serif;
+      padding: 15px 8px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--btn);
+      color: var(--fg);
+      touch-action: manipulation;
+    }
+    button:disabled { opacity: 0.35; }
+    button.primary { background: var(--accent); color: #062a24; }
+    button.stop { background: var(--bad); color: #2a0606; }
+    .wide { grid-column: span 2; }
+    body.in-ar .hide-in-ar, body:not(.in-ar) .show-in-ar { display: none !important; }
+    #reticle {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 26px;
+      height: 26px;
+      margin: -13px 0 0 -13px;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5);
+      pointer-events: none;
+    }
+    .kf { background: var(--btn); border-radius: 12px; padding: 10px; display: grid; gap: 8px; }
+    .kf .img { position: relative; }
+    .kf img { width: 100%; display: block; border-radius: 8px; }
+    .kf .dot {
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      margin: -8px 0 0 -8px;
+      border: 3px solid #ff2d55;
+      border-radius: 50%;
+      box-shadow: 0 0 0 2px #fff;
+    }
+    .kf pre { margin: 0; font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+    #msg { min-height: 1.2em; color: var(--muted); }
+    #msg.bad { color: var(--bad); }
+    #msg.ok { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <h1 class="hide-in-ar">WebXR camera test</h1>
+    <p class="note hide-in-ar">
+      Checks whether this phone can grab camera photos with pose + intrinsics during an AR session.
+      Start AR, point the white ring at something with an edge (a table corner), hold still, tap Capture.
+      The red dot on the photo should land on that same spot.
+    </p>
+    <ul id="checks"></ul>
+    <div id="live" class="show-in-ar"></div>
+    <div class="buttons">
+      <button id="start" class="primary wide hide-in-ar" disabled>Start AR test</button>
+      <button id="capture" class="primary show-in-ar">Capture keyframe</button>
+      <button id="gum" class="show-in-ar">Try getUserMedia</button>
+      <button id="stop" class="stop wide show-in-ar">Exit AR</button>
+      <button id="upload" class="wide hide-in-ar" disabled>Send results to laptop</button>
+    </div>
+    <p id="msg"></p>
+    <div id="kfs" class="hide-in-ar"></div>
+  </div>
+  <div id="reticle" class="show-in-ar"></div>
+  <script type="module" src="./camtest.js"></script>
+</body>
+</html>
