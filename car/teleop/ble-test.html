@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BLE Echo Test</title>
+  <style>
+    :root { --bg: #f4f5f7; --panel: #fff; --fg: #1b2026; --muted: #66717c; --line: #dde1e6; --accent: #12917b; --bad: #d64545; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #101418; --panel: #181e24; --fg: #e8edf1; --muted: #8e9aa5; --line: #2a333b; --accent: #2bc4a8; --bad: #ef6b6b; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0 auto; max-width: 640px; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; display: grid; gap: 12px; }
+    h1 { font-size: 18px; margin: 0; }
+    button { font: 600 15px system-ui, sans-serif; padding: 10px 14px; border-radius: 10px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    input { flex: 1; min-width: 0; font: inherit; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+    #log { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font: 13px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; min-height: 200px; overflow-wrap: anywhere; }
+    .bad { color: var(--bad); }
+    .ok { color: var(--accent); }
+    p { color: var(--muted); margin: 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>BLE echo test (mapper-car)</h1>
+  <p>Flash <code>bringup_ble_echo</code>, then Connect and pick "mapper-car". Needs Chrome/Edge on
+    a computer with Bluetooth, opened from localhost or https (not file://).</p>
+  <div class="row">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <button id="ping" disabled>Ping ×10</button>
+  </div>
+  <div class="row">
+    <input id="text" placeholder="type something and press Enter" disabled />
+    <button id="send" disabled>Send</button>
+  </div>
+  <div id="log"></div>
+  <script type="module">
+    const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // we write
+    const TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // car notifies
+    const CHUNK = 20; // safe for any MTU; the car re-joins lines at '\n'
+    const $ = (id) => document.getElementById(id);
+    const log = (msg, cls = '') => {
+      const line = document.createElement('div');
+      line.className = cls;
+      line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+      $('log').prepend(line);
+    };
+    let device, rx, buf = '', waiting = null;
+    const enc = new TextEncoder(), dec = new TextDecoder();
+
+    function onNotify(e) {
+      buf += dec.decode(e.target.value);
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (waiting) waiting(line);
+        else log(`← ${line}`);
+      }
+    }
+
+    // Writes are queued: Web Bluetooth rejects a write while another one is in flight.
+    let chain = Promise.resolve();
+    function sendLine(line) {
+      const data = enc.encode(line + '\n');
+      chain = chain.then(async () => {
+        for (let i = 0; i < data.length; i += CHUNK) await rx.writeValueWithResponse(data.slice(i, i + CHUNK));
+      });
+      return chain;
+    }
+
+    function setConnected(on) {
+      $('connect').disabled = on;
+      for (const id of ['disconnect', 'ping', 'text', 'send']) $(id).disabled = !on;
+    }
+
+    $('connect').onclick = async () => {
+      if (!navigator.bluetooth) return log('No Web Bluetooth here: use Chrome or Edge, from localhost/https.', 'bad');
+      try {
+        device = await navigator.bluetooth.requestDevice({ filters: [{ name: 'mapper-car' }], optionalServices: [NUS] });
+        device.addEventListener('gattserverdisconnected', () => {
+          log('disconnected', 'bad');
+          setConnected(false);
+        });
+        log(`connecting to ${device.name}…`);
+        const server = await device.gatt.connect();
+        const svc = await server.getPrimaryService(NUS);
+        rx = await svc.getCharacteristic(RX);
+        const tx = await svc.getCharacteristic(TX);
+        tx.addEventListener('characteristicvaluechanged', onNotify);
+        await tx.startNotifications();
+        log('connected: type a line, or Ping ×10', 'ok');
+        setConnected(true);
+      } catch (err) {
+        log(`connect failed: ${err.message}`, 'bad');
+      }
+    };
+    $('disconnect').onclick = () => device?.gatt.disconnect();
+
+    const send = () => {
+      const t = $('text').value;
+      if (!t) return;
+      log(`→ ${t}`);
+      sendLine(t).catch((err) => log(`send failed: ${err.message}`, 'bad'));
+      $('text').value = '';
+    };
+    $('send').onclick = send;
+    $('text').addEventListener('keydown', (e) => e.key === 'Enter' && send());
+
+    $('ping').onclick = async () => {
+      const times = [];
+      for (let n = 0; n < 10; n++) {
+        const msg = `ping ${n} ${'.'.repeat(40)}`;
+        const t0 = performance.now();
+        const back = await new Promise((resolve) => {
+          waiting = resolve;
+          sendLine(msg);
+          setTimeout(() => resolve(null), 2000);
+        });
+        waiting = null;
+        if (back !== msg) {
+          log(`ping ${n}: ${back === null ? 'timeout' : 'mismatch'}`, 'bad');
+          continue;
+        }
+        times.push(performance.now() - t0);
+      }
+      if (times.length) {
+        const avg = times.reduce((a, b) => a + b) / times.length;
+        log(`round trip OK ${times.length}/10, avg ${avg.toFixed(0)} ms, max ${Math.max(...times).toFixed(0)} ms`, times.length === 10 ? 'ok' : 'bad');
+      }
+    };
+  </script>
+</body>
+</html>
