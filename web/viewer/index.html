@@ -115,6 +115,7 @@
     .legend + .legend { margin-top: 4px; }
     #stats { font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
     #err { color: var(--bad); }
+    #nudgeReset { font: inherit; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; margin-bottom: 6px; }
     main { position: relative; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
     #view3d { position: absolute; inset: 0; }
@@ -174,6 +175,21 @@
       <h2>Or a local file</h2>
       <div id="drop">Drop a .jsonl here or click to pick</div>
       <input id="file" type="file" accept=".jsonl,.json,.txt" hidden />
+    </section>
+    <section id="chain" hidden>
+      <h2>Chain</h2>
+      <div id="chainList" class="note"></div>
+      <label class="check"><input id="combine" type="checkbox" /> combine chain into one map</label>
+      <label class="check"><input id="autoAlign" type="checkbox" /> auto-align overlaps (experimental)</label>
+      <select id="chainLink"></select>
+      <label class="slider">Nudge turn (°) <output id="nudgeYawV"></output>
+        <input id="nudgeYaw" type="range" min="-15" max="15" step="0.5" value="0" /></label>
+      <label class="slider">Nudge x (m) <output id="nudgeDxV"></output>
+        <input id="nudgeDx" type="range" min="-1" max="1" step="0.02" value="0" /></label>
+      <label class="slider">Nudge z (m) <output id="nudgeDzV"></output>
+        <input id="nudgeDz" type="range" min="-1" max="1" step="0.02" value="0" /></label>
+      <button id="nudgeReset" type="button">Reset nudge</button>
+      <div id="chainInfo" class="note" style="white-space: pre-line"></div>
     </section>
     <section>
       <h2>Profile</h2>

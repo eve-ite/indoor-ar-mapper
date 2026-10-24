@@ -95,3 +95,25 @@ Test without a phone:
 ```sh
 server/.venv/Scripts/python tools/make_synthetic.py scans/synthetic.jsonl   # then open /viewer/?scan=synthetic
 ```
+
+## Scan chaining (branch `scan-chaining`)
+
+Short scans that continue each other, so one long walk becomes several crash-proof pieces.
+
+1. **End a scan:** stop, put a small mark (tape/coin) on the floor under the phone, and note which
+   way you're facing (e.g. along a tile seam).
+2. **Next scan:** hold the phone over that mark, facing the same way, and tap **Continue from …**.
+   The header records `continues` (the previous session), `continues_end` (its last pose) and
+   `chain` (the first scan's id). The last pose is saved every ~2 s, so even a crashed scan can be
+   continued.
+3. **Viewer:** load any scan in the chain, then tick **combine chain into one map**. Each scan is
+   placed by matching its first pose to the previous scan's last pose (`web/common/chain.js`).
+   - **Nudge sliders** (turn / x / z, per link, remembered) fix a sloppy handover by eye: line up
+     doubled walls.
+   - **Auto-align (experimental)** matches obstacles between the scans. It's conservative: it
+     never moved a good placement in tests, but along long plain walls the overlap is ambiguous,
+     so it only partly fixes a sloppy one.
+
+Tests: `node tools/test_chain.mjs` (split a synthetic scan, re-place it with a 4°/15 cm handover
+error). Demo chain: `node tools/make_chain.mjs scans/synthetic_depth.jsonl scans/chain --err 4,0.15,-0.1`,
+then open `/viewer/?scan=chain_b&combine=1`.

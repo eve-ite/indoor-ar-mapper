@@ -35,6 +35,7 @@ const ui = {
   hint: $('hint'),
   msg: $('msg'),
   start: $('start'),
+  cont: $('continue'),
   stop: $('stop'),
   download: $('download'),
   upload: $('upload'),
@@ -106,7 +107,33 @@ function rayDir([yawDeg, pitchDeg]) {
 
 // ---- recording state ----
 let rec = null; // { header, lines[], pending, frames, points, t0, lastT, rayHits[], rayTries }
-let lastScan = null; // { id, text }
+let lastScan = null;
+
+// ---- scan chaining: the next scan can start where this one ended (on a floor mark) ----
+const LAST_END_KEY = 'iam-last-end';
+function saveLastEnd(r) {
+  if (!r?.lastPose) return;
+  try {
+    localStorage.setItem(
+      LAST_END_KEY,
+      JSON.stringify({ session_id: r.header.session_id, chain: r.header.chain || r.header.session_id, ...r.lastPose, at: Date.now() }),
+    );
+  } catch {}
+}
+function loadLastEnd() {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_END_KEY));
+  } catch {
+    return null;
+  }
+}
+function refreshContinue() {
+  const end = loadLastEnd();
+  ui.cont.hidden = !end;
+  if (!end) return;
+  const mins = Math.round((Date.now() - end.at) / 60000);
+  ui.cont.textContent = `Continue from ${end.session_id} (ended ${mins < 1 ? 'just now' : mins + ' min ago'})`;
+} // { id, text }
 let session = null;
 let hitSources = [];
 let depthOn = false;
@@ -189,8 +216,8 @@ function renderStatus() {
 }
 
 // ---- session ----
-async function startScan() {
-  ui.start.disabled = true;
+async function startScan(continueFrom = null) {
+  ui.start.disabled = ui.cont.disabled = true;
   say('');
   try {
     ensureRenderer();
@@ -216,12 +243,12 @@ async function startScan() {
     if (!session) session = await navigator.xr.requestSession('immersive-ar', base);
   } catch (err) {
     say(`Could not start AR: ${err.message}`, 'bad');
-    ui.start.disabled = false;
+    ui.start.disabled = ui.cont.disabled = false;
     return;
   }
 
   document.body.classList.add('in-ar');
-  ui.start.hidden = true;
+  ui.start.hidden = ui.cont.hidden = true;
   ui.stop.hidden = false;
   if (!session.domOverlayState) say('No DOM overlay: press Android Back to stop.', 'warn');
 
@@ -248,6 +275,11 @@ async function startScan() {
   const header = {
     type: 'header',
     session_id: randomId(),
+    // Chaining: this scan started on the floor mark where `continues` ended, facing the same way.
+    // The viewer places it using that scan's end pose and this scan's first pose.
+    ...(continueFrom
+      ? { continues: continueFrom.session_id, continues_end: { p: continueFrom.p, q: continueFrom.q }, chain: continueFrom.chain }
+      : {}),
     device: ui.device.value.trim() || detectedDevice,
     ref_space: 'local-floor',
     start_marker: { p: [0, 0, 0], q: [0, 0, 0, 1] },
@@ -284,7 +316,8 @@ async function startScan() {
     lastFrameTime: null,
     recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
   };
-  showHint('warn', 'Move side to side ↔', 'Let ARCore find the floor before walking off');
+  if (continueFrom) showHint('warn', 'Stand on your mark ⤓', 'Same spot and direction as where the last scan ended. Hold still a second.');
+  else showHint('warn', 'Move side to side ↔', 'Let ARCore find the floor before walking off');
   visCount = visHead = 0;
   visGeom.setDrawRange(0, 0);
   await store.startSession(header, headerLine);
@@ -368,6 +401,7 @@ function onXRFrame(time, frame) {
   rec.pendingFrames++;
   rec.frames++;
   rec.points += pts.length;
+  rec.lastPose = { p: [r3(pos.x), r3(pos.y), r3(pos.z)], q: [r3(ori.x), r3(ori.y), r3(ori.z), r3(ori.w)] };
 
   if (rec.pendingFrames >= FLUSH_EVERY_FRAMES) flush();
   renderStatus();
@@ -416,6 +450,7 @@ function updateHint(ori) {
 
 function flush() {
   if (!rec || !rec.pending) return;
+  saveLastEnd(rec);
   const text = rec.pending;
   const frames = rec.frames;
   rec.pending = '';
@@ -459,9 +494,17 @@ async function onSessionEnd() {
     await store.updateSession(id, { done: true, frames: done.frames });
     lastScan = { id, text: done.lines.join(''), frames: done.frames, points: done.points };
     rec = null;
-    say(done.frames ? `Scan ${id} saved on phone (${done.frames} frames).` : 'Scan was empty.', done.frames ? '' : 'warn');
+    saveLastEnd(done);
+    say(
+      done.frames
+        ? `Scan ${id} saved on phone (${done.frames} frames). To chain the next one: mark the floor under the phone now and note which way you face, then start the next scan there with Continue.`
+        : 'Scan was empty.',
+      done.frames ? '' : 'warn',
+    );
   }
   ui.download.disabled = ui.upload.disabled = !lastScan;
+  ui.cont.disabled = false;
+  refreshContinue();
   renderStatus();
   refreshSaved();
 }
@@ -538,12 +581,17 @@ async function refreshSaved() {
 
 // ---- wiring ----
 // An error after the session starts would leave a frozen AR view with no frame loop.
-ui.start.onclick = () =>
-  startScan().catch((err) => {
+const startWith = (from) =>
+  startScan(from).catch((err) => {
     console.error(err);
     session?.end();
     say(`Start failed: ${err.message}`, 'bad');
   });
+ui.start.onclick = () => startWith(null);
+ui.cont.onclick = () => {
+  const end = loadLastEnd();
+  if (end) startWith(end);
+};
 ui.stop.onclick = stopScan;
 ui.download.onclick = () => lastScan && downloadText(lastScan.id, lastScan.text);
 ui.upload.onclick = () => lastScan && uploadText(lastScan.id, lastScan.text);
@@ -572,6 +620,8 @@ async function init() {
   detectedDevice = await guessDevice();
   ui.device.placeholder = detectedDevice === 'unknown' ? 'e.g. Galaxy S23' : detectedDevice;
   ui.start.disabled = false;
+  ui.cont.disabled = false;
+  refreshContinue();
   renderStatus();
 }
 

@@ -3,6 +3,7 @@ import { parseScan } from '../common/jsonl.js';
 import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
 import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
 import { View3D } from './view3d.js';
+import { chainOrder, mergeChain } from '../common/chain.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -17,6 +18,8 @@ const ROUTE_COLOR = '#facc15';
 const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 
 let scan = null; // { name, header, frames, skipped, stats }
+let serverScans = []; // summaries from /api/scans (incl. continues/chain links)
+let chain = null; // { ids, texts: Map id -> JSONL } for the loaded scan's chain, or null
 let grid = null;
 let gridImage = null;
 let trav = null;
@@ -34,6 +37,7 @@ async function loadServerList() {
     const res = await fetch(`${SERVER}/api/scans`);
     if (!res.ok) throw new Error(res.status);
     const list = await res.json();
+    serverScans = list;
     if (!list.length) {
       box.textContent = 'none uploaded yet';
       return;
@@ -44,7 +48,7 @@ async function loadServerList() {
         b.dataset.id = s.id;
         b.innerHTML = `<div></div><div class="meta"></div>`;
         b.firstChild.textContent = s.id;
-        b.lastChild.textContent = `${s.frames} frames · ${s.points} pts · ${s.created ? new Date(s.created).toLocaleString() : ''}`;
+        b.lastChild.textContent = `${s.continues ? '↪ ' + s.continues + ' · ' : ''}${s.frames} frames · ${s.points} pts · ${s.created ? new Date(s.created).toLocaleString() : ''}`;
         b.onclick = () => loadFromServer(s.id);
         return b;
       }),
@@ -58,8 +62,10 @@ async function loadFromServer(id) {
   try {
     const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error(`${res.status}`);
-    setScan(id, await res.text());
+    const text = await res.text();
+    setScan(id, text);
     document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+    setupChain(id, text);
   } catch (err) {
     $('err').textContent = `Could not load ${id}: ${err.message}`;
   }
@@ -67,26 +73,110 @@ async function loadFromServer(id) {
 
 function loadFile(file) {
   const reader = new FileReader();
-  reader.onload = () => setScan(file.name, reader.result);
+  reader.onload = () => {
+    setScan(file.name, reader.result);
+    setupChain(null);
+  };
   reader.readAsText(file);
 }
 
 function setScan(name, text) {
+  setParsed(name, parseScan(text));
+}
+
+// keepView: re-render in place (used while nudging a chain) instead of resetting route + camera.
+function setParsed(name, parsed, { keepView = false } = {}) {
   $('err').textContent = '';
-  const parsed = parseScan(text);
   if (!parsed.frames.length) {
     $('err').textContent = `${name}: no frames found${parsed.header ? '' : ' (and no header)'}`;
     return;
   }
   scan = { name, ...parsed };
   detected = detectProfile(scan.frames);
-  route = { a: null, b: null, path: null, info: '' };
-  const r = (params.get('route') || '').split(',').map(Number); // ?route=ax,az,bx,bz
-  if (r.length === 4 && r.every(isFinite)) route = { a: [r[0], r[1]], b: [r[2], r[3]], path: null, info: '' };
+  if (!keepView) {
+    route = { a: null, b: null, path: null, info: '' };
+    const r = (params.get('route') || '').split(',').map(Number); // ?route=ax,az,bx,bz
+    if (r.length === 4 && r.every(isFinite)) route = { a: [r[0], r[1]], b: [r[2], r[3]], path: null, info: '' };
+  }
   applyProfile();
   rebuild();
-  fit();
+  if (!keepView) fit();
 }
+
+// ---- scan chains: scans started where the previous one ended ----
+const NUDGE_KEY = 'iam-chain-nudges';
+const loadNudges = () => {
+  try {
+    return JSON.parse(localStorage.getItem(NUDGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+};
+const saveNudges = (n) => {
+  try {
+    localStorage.setItem(NUDGE_KEY, JSON.stringify(n));
+  } catch {}
+};
+
+function setupChain(id, text) {
+  const ids = id ? chainOrder(serverScans, id) : [];
+  chain = ids.length > 1 ? { ids, texts: new Map(id && text ? [[id, text]] : []), loadedId: id } : null;
+  $('chain').hidden = !chain;
+  if (!chain) return;
+  $('chainList').textContent = ids.join(' → ');
+  $('combine').checked = params.get('combine') === '1';
+  $('chainLink').replaceChildren(
+    ...ids.slice(1).map((cid, k) => Object.assign(document.createElement('option'), { value: cid, textContent: `${ids[k]} → ${cid}` })),
+  );
+  syncNudgeSliders();
+  if ($('combine').checked) combineChain();
+  else $('chainInfo').textContent = 'Tick Combine to stitch these into one map.';
+}
+
+async function combineChain({ keepView = false } = {}) {
+  if (!chain) return;
+  for (const cid of chain.ids) {
+    if (chain.texts.has(cid)) continue;
+    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(cid)}`);
+    if (!res.ok) throw new Error(`${cid}: ${res.status}`);
+    chain.texts.set(cid, await res.text());
+  }
+  const parsed = chain.ids.map((cid) => parseScan(chain.texts.get(cid)));
+  const m = mergeChain(parsed, { refine: $('autoAlign').checked, nudges: loadNudges() });
+  setParsed(`chain of ${chain.ids.length}`, { header: parsed[0].header, frames: m.frames, keyframes: m.keyframes, skipped: 0 }, { keepView });
+  const nudges = loadNudges();
+  const nudged = (id) => (nudges[id] && (nudges[id].yawDeg || nudges[id].dx || nudges[id].dz) ? ' + manual nudge' : '');
+  $('chainInfo').textContent = m.links
+    .map((l) => {
+      if (!l.refine) return `${l.id}: placed by floor mark${nudged(l.id)}`;
+      if (l.refine.used) {
+        const c = l.refine.correction;
+        return `${l.id}: auto-aligned (${c.yawDeg}°, ${c.dx} m, ${c.dz} m)${nudged(l.id)}`;
+      }
+      return `${l.id}: kept floor-mark placement (${l.refine.reason})${nudged(l.id)}`;
+    })
+    .join('\n');
+}
+
+function syncNudgeSliders() {
+  const n = loadNudges()[$('chainLink').value] || {};
+  for (const [k, def] of [['nudgeYaw', 'yawDeg'], ['nudgeDx', 'dx'], ['nudgeDz', 'dz']]) {
+    $(k).value = n[def] ?? 0;
+    $(`${k}V`).textContent = $(k).value;
+  }
+}
+
+let nudgeTimer = null;
+function onNudge() {
+  const all = loadNudges();
+  all[$('chainLink').value] = { yawDeg: +$('nudgeYaw').value, dx: +$('nudgeDx').value, dz: +$('nudgeDz').value };
+  saveNudges(all);
+  for (const k of ['nudgeYaw', 'nudgeDx', 'nudgeDz']) $(`${k}V`).textContent = $(k).value;
+  clearTimeout(nudgeTimer);
+  if ($('combine').checked) nudgeTimer = setTimeout(() => combineChain({ keepView: true }).catch(showChainErr), 120);
+}
+
+const showChainErr = (err) => ($('chainInfo').textContent = `Couldn't combine: ${err.message}`);
 
 // ---- grid ----
 function opts() {
@@ -551,6 +641,23 @@ for (const k of SLIDERS) {
   });
 }
 for (const id of ['showGrid', 'showPts', 'showTraj', 'mapMode']) $(id).addEventListener('change', draw);
+$('combine').addEventListener('change', () => {
+  if ($('combine').checked) combineChain().catch(showChainErr);
+  else if (chain) {
+    setScan(chain.loadedId, chain.texts.get(chain.loadedId));
+    $('chainInfo').textContent = 'Showing one scan.';
+  }
+});
+$('autoAlign').addEventListener('change', () => $('combine').checked && combineChain({ keepView: true }).catch(showChainErr));
+$('chainLink').addEventListener('change', syncNudgeSliders);
+for (const k of ['nudgeYaw', 'nudgeDx', 'nudgeDz']) $(k).addEventListener('input', onNudge);
+$('nudgeReset').addEventListener('click', () => {
+  const all = loadNudges();
+  delete all[$('chainLink').value];
+  saveNudges(all);
+  syncNudgeSliders();
+  if ($('combine').checked) combineChain({ keepView: true }).catch(showChainErr);
+});
 $('profile').addEventListener('change', () => {
   applyProfile();
   rebuild();
@@ -567,5 +674,6 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 });
 
 resize();
-loadServerList();
-if (params.get('scan')) loadFromServer(params.get('scan'));
+loadServerList().then(() => {
+  if (params.get('scan')) loadFromServer(params.get('scan'));
+});

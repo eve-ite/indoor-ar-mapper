@@ -44,6 +44,9 @@ def summarize(path: Path) -> dict:
         "id": path.stem,
         "created": (header or {}).get("created"),
         "device": (header or {}).get("device"),
+        # scan chaining: this scan started where `continues` ended (same floor mark)
+        "continues": (header or {}).get("continues"),
+        "chain": (header or {}).get("chain"),
         "frames": frames,
         "points": points,
         "bytes": path.stat().st_size,
