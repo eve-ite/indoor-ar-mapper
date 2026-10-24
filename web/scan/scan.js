@@ -23,9 +23,9 @@ const MAX_SPEED = 0.6; // m/s
 const params = new URLSearchParams(location.search);
 // Optional upload base URL for when the pages are hosted separately from the server.
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
-let DEVICE = params.get('device') || 'unknown';
-// Depth lidar is opt-in (?depth=1): with it on, the S23 froze before recording a frame.
-const DEPTH_REQUESTED = params.get('depth') === '1';
+let detectedDevice = 'unknown';
+// Depth lidar is opt-in (Settings toggle or ?depth=1) until it's been tried on more phones.
+let depthRequested = false; // captured when a scan starts
 const DEPTH_EVERY = 2; // sample depth on every Nth recorded frame (5 Hz)
 const DEPTH_MAX_MS = 25; // pause depth sampling if it averages slower than this
 
@@ -39,7 +39,31 @@ const ui = {
   download: $('download'),
   upload: $('upload'),
   saved: $('saved'),
+  depth: $('depthToggle'),
+  device: $('deviceName'),
 };
+
+// ---- settings: remembered on this phone; URL params (?depth=1, ?device=...) override ----
+const SETTINGS_KEY = 'iam-scan-settings';
+
+function loadSettings() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+  } catch {}
+  ui.depth.checked = params.has('depth') ? params.get('depth') === '1' : !!saved.depth;
+  ui.device.value = params.get('device') || saved.device || '';
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ depth: ui.depth.checked, device: ui.device.value.trim() }));
+  } catch {}
+}
+
+loadSettings();
+ui.depth.addEventListener('change', saveSettings);
+ui.device.addEventListener('change', saveSettings);
 
 // Chrome's reduced UA string says "K" for every Android model; Client Hints have the real one.
 async function guessDevice() {
@@ -158,7 +182,7 @@ function renderStatus() {
     `tracking ${trackingState}  ${Math.round(rec.fps)} fps\n` +
     (depthOn
       ? `depth ${rec.depthPaused ? 'PAUSED (too slow)' : 'ON'}  ${rec.depthMs.toFixed(1)} ms  ${rec.depthPoints} pts\n`
-      : `depth off${DEPTH_REQUESTED ? ' (not granted)' : ''}\n`) +
+      : `depth off${depthRequested ? ' (not granted)' : ''}\n`) +
     `frames ${rec.frames}  points ${rec.points}  hit ${hitPct}%\n` +
     `per-ray % ${perRay}\n` +
     `saved ${rec.savedFrames}/${rec.frames}`;
@@ -176,7 +200,8 @@ async function startScan() {
       optionalFeatures: ['dom-overlay'],
       domOverlay: { root: overlayRoot },
     };
-    if (DEPTH_REQUESTED) {
+    depthRequested = ui.depth.checked;
+    if (depthRequested) {
       try {
         // CPU path only (the GPU sample's shader failed on the S23).
         session = await navigator.xr.requestSession('immersive-ar', {
@@ -206,7 +231,7 @@ async function startScan() {
   // depthUsage throws (InvalidStateError) when depth-sensing wasn't granted.
   depthOn = false;
   try {
-    depthOn = DEPTH_REQUESTED && session.depthUsage === 'cpu-optimized';
+    depthOn = depthRequested && session.depthUsage === 'cpu-optimized';
   } catch {}
 
   const viewerSpace = await session.requestReferenceSpace('viewer');
@@ -223,7 +248,7 @@ async function startScan() {
   const header = {
     type: 'header',
     session_id: randomId(),
-    device: DEVICE,
+    device: ui.device.value.trim() || detectedDevice,
     ref_space: 'local-floor',
     start_marker: { p: [0, 0, 0], q: [0, 0, 0, 1] },
     created: new Date().toISOString(),
@@ -544,7 +569,8 @@ async function init() {
     say('AR sessions are not supported here. Needs Chrome on an ARCore phone.', 'bad');
     return;
   }
-  if (!params.get('device')) DEVICE = await guessDevice();
+  detectedDevice = await guessDevice();
+  ui.device.placeholder = detectedDevice === 'unknown' ? 'e.g. Galaxy S23' : detectedDevice;
   ui.start.disabled = false;
   renderStatus();
 }

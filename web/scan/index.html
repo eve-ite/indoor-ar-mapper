@@ -76,6 +76,29 @@
     .saved-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .saved-item button { font-size: 14px; padding: 8px 10px; border-radius: 8px; background: #33404a; }
     .tip { color: var(--muted); font-size: 14px; margin: 0; }
+    .settings { display: flex; flex-direction: column; gap: 10px; }
+    .toggle, .field {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--btn);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 16px;
+    }
+    .toggle input { width: 26px; height: 26px; accent-color: var(--accent); flex: none; }
+    .toggle small { display: block; color: var(--muted); font-size: 13px; }
+    .field span { flex: none; }
+    .field input {
+      flex: 1;
+      min-width: 0;
+      font: inherit;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #33404a;
+      background: var(--bg);
+      color: var(--fg);
+    }
   </style>
 </head>
 <body>
@@ -98,6 +121,17 @@
       curves rather than spinning on the spot, and follow the hint at the top. Scans save on the
       phone as you go; upload whenever the network cooperates.
     </p>
+    <div class="hide-in-ar settings">
+      <h2 class="tip">Settings</h2>
+      <label class="toggle">
+        <input id="depthToggle" type="checkbox" />
+        <span>Depth lidar <small>(beta: sees tables &amp; clutter, Android only)</small></span>
+      </label>
+      <label class="field">
+        <span>Device name</span>
+        <input id="deviceName" type="text" autocomplete="off" />
+      </label>
+    </div>
     <div class="hide-in-ar">
       <h2 class="tip">Saved on this phone</h2>
       <div id="saved"></div>
