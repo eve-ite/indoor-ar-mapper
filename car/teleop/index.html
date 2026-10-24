@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Car Teleop</title>
+  <style>
+    :root {
+      --bg: #f4f5f7;
+      --panel: #ffffff;
+      --fg: #1b2026;
+      --muted: #66717c;
+      --line: #dde1e6;
+      --accent: #12917b;
+      --warn: #c98a12;
+      --bad: #d64545;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101418;
+        --panel: #181e24;
+        --fg: #e8edf1;
+        --muted: #8e9aa5;
+        --line: #2a333b;
+        --accent: #2bc4a8;
+        --warn: #f2b84b;
+        --bad: #ef6b6b;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+      max-width: 720px;
+      margin: 0 auto;
+    }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    h1 { font-size: 18px; margin: 0; }
+    .pills { display: flex; gap: 8px; flex-wrap: wrap; }
+    .pill { padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+    .pill::before { content: '●'; margin-right: 6px; color: var(--bad); }
+    .pill.ok::before { color: var(--accent); }
+    .pill.warn::before { color: var(--warn); }
+    #stop {
+      font: 800 34px system-ui, sans-serif;
+      letter-spacing: 0.06em;
+      padding: 26px;
+      border: 0;
+      border-radius: 18px;
+      background: var(--bad);
+      color: #fff;
+      cursor: pointer;
+      touch-action: manipulation;
+      box-shadow: 0 4px 14px rgba(214, 69, 69, 0.35);
+    }
+    #stop:active { transform: scale(0.98); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+    .stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat .v { font: 600 22px ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+    .stat.bad { border-color: var(--bad); }
+    .stat.bad .v { color: var(--bad); }
+    .drive { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center; }
+    #keys { display: grid; grid-template-columns: repeat(3, 52px); grid-template-rows: repeat(2, 52px); gap: 6px; }
+    #keys span {
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      font: 700 18px system-ui, sans-serif;
+      color: var(--muted);
+    }
+    #keys span.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #keys .up { grid-column: 2; }
+    #keys .left { grid-column: 1; grid-row: 2; }
+    #keys .down { grid-column: 2; grid-row: 2; }
+    #keys .right { grid-column: 3; grid-row: 2; }
+    #joy {
+      width: 200px;
+      height: 200px;
+      border-radius: 50%;
+      background: var(--panel);
+      border: 2px solid var(--line);
+      position: relative;
+      touch-action: none;
+      justify-self: end;
+    }
+    #knob {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 70px;
+      height: 70px;
+      margin: -35px 0 0 -35px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: 0.85;
+      pointer-events: none;
+    }
+    label.speed { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
+    label.speed input { accent-color: var(--accent); }
+    .cmd { font: 13px ui-monospace, Consolas, monospace; color: var(--muted); }
+    .help { color: var(--muted); font-size: 13px; margin: 0; }
+    @media (max-width: 520px) {
+      .drive { grid-template-columns: 1fr; justify-items: center; }
+      #joy { justify-self: center; width: 240px; height: 240px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Car teleop</h1>
+    <div class="pills">
+      <span id="srvPill" class="pill">server</span>
+      <span id="carPill" class="pill">car</span>
+    </div>
+  </header>
+
+  <button id="stop">STOP</button>
+
+  <div class="grid">
+    <div class="stat" id="distBox"><div class="k">ultrasonic</div><div class="v" id="dist">–</div></div>
+    <div class="stat" id="irBox"><div class="k">IR</div><div class="v" id="ir">–</div></div>
+    <div class="stat"><div class="k">left steps</div><div class="v" id="ls">–</div></div>
+    <div class="stat"><div class="k">right steps</div><div class="v" id="rs">–</div></div>
+    <div class="stat"><div class="k">yaw rate</div><div class="v" id="yaw">–</div></div>
+    <div class="stat"><div class="k">wifi / uptime</div><div class="v" id="link">–</div></div>
+  </div>
+
+  <label class="speed">Speed <input id="speed" type="range" min="0.1" max="1" step="0.05" value="1" /> <span id="speedV">100%</span></label>
+
+  <div class="drive">
+    <div>
+      <div id="keys">
+        <span class="up">W</span><span class="left">A</span><span class="down">S</span><span class="right">D</span>
+      </div>
+      <p class="cmd" id="cmd">v 0.00 · w 0.00</p>
+    </div>
+    <div id="joy"><div id="knob"></div></div>
+  </div>
+
+  <p class="help">
+    WASD or arrow keys while this tab is focused (space = stop), or drag the joystick.
+    Letting go, switching tabs or leaving the window sends a stop; the car also stops on its own
+    if it hears nothing for 300 ms, and won't drive forward closer than 15 cm to something.
+  </p>
+  <script type="module" src="./teleop.js"></script>
+</body>
+</html>
