@@ -1,6 +1,6 @@
 // M2 map viewer: loads a scan JSONL (server list or local file) and draws grid + points + trajectory.
 import { parseScan } from '../common/jsonl.js';
-import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile } from '../common/grid.js';
+import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
 import { TRAV, astar, traversability } from '../common/trav.js';
 
 const params = new URLSearchParams(location.search);
@@ -168,7 +168,7 @@ function renderTravImage(g, t) {
     } else if (t.tier[i] === TRAV.SEEN) {
       img.data.set(accent, j);
       img.data[j + 3] = 70;
-    } else if (g.L[i] > 1) {
+    } else if (t.occ[i]) {
       img.data.set(occ, j);
       img.data[j + 3] = 200;
     }
@@ -294,9 +294,9 @@ function draw() {
       ctx.globalAlpha = cls === 'wall' ? 0.8 : 0.45;
       for (const [i, f] of scan.frames.entries()) {
         const floor = grid ? grid.floors[i] : 0;
-        for (const [hits, margin] of [[f.pts, 0], [f.dpts, o.depthMargin]]) {
+        for (const [hits, isDepth] of [[f.pts, false], [f.dpts, true]]) {
           for (const h of hits || []) {
-            if (classifyHeight(h[1] - floor, o, margin) !== cls) continue;
+            if (classifyHeight(h[1] - floor, o, hitMargin(f, h, isDepth, o)) !== cls) continue;
             ctx.fillRect(sx(h[0]) - size / 2, sy(h[2]) - size / 2, size, size);
           }
         }

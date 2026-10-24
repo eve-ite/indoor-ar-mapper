@@ -15,7 +15,8 @@ export const DEFAULTS = {
   pad: 0.5, // m around the data bounds
   bodyRadius: 0.25, // m; half the width of whatever walked/drove the scan
   maxStep: 1.0, // m; trajectory jumps longer than this (tracking glitches) aren't stamped as walked
-  depthMargin: 0.08, // m; extra height tolerance for depth samples (noisier than plane hits)
+  depthMargin: 0.04, // m; extra height tolerance for depth samples (noisier than plane hits)...
+  depthMarginPerM: 0.02, // ...plus this much per meter of range, since depth noise grows with distance
 };
 
 // Who scanned / who will travel. Heights are above the tracked floor.
@@ -85,28 +86,34 @@ export function buildGrid(frames, opts = {}) {
 
   // All heights below are relative to the tracked floor, not local-floor's y=0.
   const floors = floorPerFrame(frames);
+  // obs counts obstacle hits per cell on their own, so floor seen *under* a table can't vote the
+  // table away (trav.js decides from it).
+  const obs = new Uint16Array(w * h);
   const counts = { floor: 0, wall: 0, ignored: 0 };
   frames.forEach((f, i) => {
     const floor = floors[i];
     const phoneH = f.p[1] - floor;
     const [px, pz] = toCell(f.p[0], f.p[2]);
     bump(px, pz, o.lFree); // the phone/car was physically here
-    for (const [hits, margin] of [[f.pts, 0], [f.dpts, o.depthMargin]]) for (const hit of hits || []) {
-      const [hx, hy, hz] = hit;
-      const hitH = hy - floor;
-      if (Math.hypot(hx - f.p[0], hz - f.p[2]) > o.maxRange) { counts.ignored++; continue; }
-      const [cx, cz] = toCell(hx, hz);
-      const cls = classifyHeight(hitH, o, margin);
-      if (cls === 'floor') {
-        traceFree(px, pz, phoneH, cx, cz, hitH);
-        bump(cx, cz, o.lFree);
-        counts.floor++;
-      } else if (cls === 'wall') {
-        traceFree(px, pz, phoneH, cx, cz, hitH);
-        bump(cx, cz, o.lOcc);
-        counts.wall++;
-      } else {
-        counts.ignored++; // ceiling / between floor and wall band
+    for (const [hits, isDepth] of [[f.pts, false], [f.dpts, true]]) {
+      for (const hit of hits || []) {
+        const [hx, hy, hz] = hit;
+        const hitH = hy - floor;
+        if (Math.hypot(hx - f.p[0], hz - f.p[2]) > o.maxRange) { counts.ignored++; continue; }
+        const [cx, cz] = toCell(hx, hz);
+        const cls = classifyHeight(hitH, o, hitMargin(f, hit, isDepth, o));
+        if (cls === 'floor') {
+          traceFree(px, pz, phoneH, cx, cz, hitH);
+          bump(cx, cz, o.lFree);
+          counts.floor++;
+        } else if (cls === 'wall') {
+          traceFree(px, pz, phoneH, cx, cz, hitH);
+          bump(cx, cz, o.lOcc);
+          if (inside(cx, cz)) obs[cz * w + cx] = Math.min(65535, obs[cz * w + cx] + 1);
+          counts.wall++;
+        } else {
+          counts.ignored++; // ceiling / between floor and wall band
+        }
       }
     }
   });
@@ -131,7 +138,7 @@ export function buildGrid(frames, opts = {}) {
   }
   if (frames.length === 1) stamp(frames[0].p[0], frames[0].p[2]);
 
-  return { w, h, minX, minZ, cell: o.cell, L, walked, counts, floors, opts: o };
+  return { w, h, minX, minZ, cell: o.cell, L, obs, walked, counts, floors, opts: o };
 }
 
 export function floorPerFrame(frames) {
@@ -145,6 +152,13 @@ export function classifyHeight(y, o, margin = 0) {
   if (y < o.floorMax + margin) return 'floor';
   if (y >= o.wallMin + margin && y <= o.wallMax) return 'wall';
   return 'other';
+}
+
+// Height tolerance for one hit: plane hits are exact; depth gets noisier with range.
+export function hitMargin(f, hit, isDepth, o) {
+  if (!isDepth) return 0;
+  const d = Math.hypot(hit[0] - f.p[0], hit[1] - f.p[1], hit[2] - f.p[2]);
+  return o.depthMargin + o.depthMarginPerM * d;
 }
 
 // Plane hit-test hits (pts) + depth-map samples (dpts, when the scan had depth).

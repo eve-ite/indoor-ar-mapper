@@ -10,6 +10,7 @@ export const TRAV = { BLOCKED: 0, WALKED: 1, SEEN: 2 };
 
 export const TRAV_DEFAULTS = {
   occL: 1.0, // log-odds above this = obstacle
+  obsMin: 2, // obstacle hits in a 3x3 neighbourhood (15 cm) = obstacle
   freeL: -0.5, // log-odds below this = floor seen
   seenCost: 4, // per-cell cost of floor-seen cells relative to walked ones
 };
@@ -31,12 +32,25 @@ function dilate(mask, w, h, r) {
   return out;
 }
 
-// Returns { tier: Uint8Array of TRAV values, cost: Float32Array (Infinity = blocked) }.
+// Returns { tier: Uint8Array of TRAV values, cost: Float32Array (Infinity = blocked), occ: obstacle mask }.
 export function traversability(grid, opts = {}) {
   const o = { ...TRAV_DEFAULTS, ...opts };
-  const { w, h, L, walked } = grid;
+  const { w, h, L, obs, walked } = grid;
+  // Obstacle: enough obstacle hits in the 3x3 neighbourhood (depth hits are sparse per 5 cm cell),
+  // regardless of floor seen in the same cells (floor under a table top).
   const occ = new Uint8Array(w * h);
-  for (let i = 0; i < L.length; i++) if (L[i] > o.occL) occ[i] = 1;
+  for (let z = 0; z < h; z++) {
+    for (let x = 0; x < w; x++) {
+      let n = 0;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, nz = z + dz;
+          if (nx >= 0 && nz >= 0 && nx < w && nz < h) n += obs[nz * w + nx];
+        }
+      }
+      if (n >= o.obsMin || L[z * w + x] > o.occL) occ[z * w + x] = 1;
+    }
+  }
   const blocked = dilate(occ, w, h, Math.round(grid.opts.bodyRadius / grid.cell));
 
   const tier = new Uint8Array(w * h);
@@ -50,7 +64,7 @@ export function traversability(grid, opts = {}) {
       cost[i] = o.seenCost;
     }
   }
-  return { tier, cost };
+  return { tier, cost, occ };
 }
 
 // 8-connected A* over the cost grid. start/goal are cell indices.
