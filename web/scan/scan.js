@@ -46,6 +46,7 @@ const ui = {
   labelBtn: $('labelBtn'),
   depth: $('depthToggle'),
   device: $('deviceName'),
+  mapPick: $('mapPick'),
 };
 
 // ---- settings: remembered on this phone; URL params (?depth=1, ?device=...) override ----
@@ -65,6 +66,66 @@ function saveSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({ depth: ui.depth.checked, device: ui.device.value.trim() }));
   } catch {}
 }
+
+// ---- maps: one location = one map; every scan records which map it belongs to ----
+const MAPS_KEY = 'iam-maps'; // [{ id, name }] known on this phone
+const MAP_PICK_KEY = 'iam-map-pick';
+const NEW_MAP = '__new__';
+function knownMaps() {
+  try {
+    return JSON.parse(localStorage.getItem(MAPS_KEY)) || [];
+  } catch {
+    return [];
+  }
+}
+function saveKnownMaps(list) {
+  try {
+    localStorage.setItem(MAPS_KEY, JSON.stringify(list));
+  } catch {}
+}
+function renderMapPick(selectId) {
+  const maps = knownMaps();
+  ui.mapPick.replaceChildren(
+    ...maps.map((m) => Object.assign(document.createElement('option'), { value: m.id, textContent: m.name })),
+    Object.assign(document.createElement('option'), { value: NEW_MAP, textContent: '+ New map…' }),
+  );
+  let pick = selectId;
+  try {
+    pick ??= localStorage.getItem(MAP_PICK_KEY);
+  } catch {}
+  ui.mapPick.value = maps.some((m) => m.id === pick) ? pick : maps[0]?.id ?? NEW_MAP;
+}
+function currentMapPick() {
+  return knownMaps().find((m) => m.id === ui.mapPick.value) || null;
+}
+function newMap(name) {
+  const m = { id: 'm-' + randomId().slice(0, 8), name: name.slice(0, 80) };
+  saveKnownMaps([m, ...knownMaps()]);
+  return m;
+}
+async function syncServerMaps() {
+  try {
+    const res = await fetch(`${SERVER}/api/maps`);
+    if (!res.ok) return;
+    const remote = (await res.json()).filter((m) => !m.simulated).map((m) => ({ id: m.id, name: m.name }));
+    const local = knownMaps();
+    const merged = [...local.map((m) => remote.find((r) => r.id === m.id) || m), ...remote.filter((r) => !local.some((m) => m.id === r.id))];
+    saveKnownMaps(merged);
+    renderMapPick(ui.mapPick.value === NEW_MAP ? undefined : ui.mapPick.value);
+  } catch {} // offline: the phone's own list still works
+}
+ui.mapPick.addEventListener('change', () => {
+  if (ui.mapPick.value === NEW_MAP) {
+    const name = (prompt('Name this map (the place you are scanning, e.g. "Hall B"):') || '').trim();
+    if (name) renderMapPick(newMap(name).id);
+    else renderMapPick();
+  }
+  try {
+    localStorage.setItem(MAP_PICK_KEY, ui.mapPick.value);
+  } catch {}
+  refreshContinue();
+});
+renderMapPick();
 
 loadSettings();
 ui.depth.addEventListener('change', saveSettings);
@@ -120,7 +181,13 @@ function saveLastEnd(r) {
   try {
     localStorage.setItem(
       LAST_END_KEY,
-      JSON.stringify({ session_id: r.header.session_id, chain: r.header.chain || r.header.session_id, ...r.lastPose, at: Date.now() }),
+      JSON.stringify({
+        session_id: r.header.session_id,
+        chain: r.header.chain || r.header.session_id,
+        map: r.header.map?.id || null,
+        ...r.lastPose,
+        at: Date.now(),
+      }),
     );
   } catch {}
 }
@@ -132,7 +199,8 @@ function loadLastEnd() {
   }
 }
 function refreshContinue() {
-  const end = loadLastEnd();
+  let end = loadLastEnd();
+  if (end && end.map && end.map !== ui.mapPick.value) end = null; // only continue within the same map
   ui.cont.hidden = !end;
   if (!end) return;
   const mins = Math.round((Date.now() - end.at) / 60000);
@@ -279,6 +347,15 @@ async function startScan(continueFrom = null) {
   const header = {
     type: 'header',
     session_id: randomId(),
+    // Which location this scan belongs to (picked in Settings). The viewer groups scans by map.
+    map: (() => {
+      let m = currentMapPick();
+      if (!m) {
+        m = newMap(`Map ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+        renderMapPick(m.id);
+      }
+      return { id: m.id, name: m.name };
+    })(),
     // Chaining: this scan started on the floor mark where `continues` ended, facing the same way.
     // The viewer places it using that scan's end pose and this scan's first pose.
     ...(continueFrom
@@ -645,6 +722,7 @@ document.addEventListener('visibilitychange', () => document.hidden && flush());
 
 async function init() {
   refreshSaved();
+  syncServerMaps(); // the server's maps show in the picker even before AR is checked
   if (!window.isSecureContext) {
     ui.status.textContent = 'not a secure context';
     say('WebXR needs HTTPS. Open this page through the cloudflared https:// URL.', 'bad');

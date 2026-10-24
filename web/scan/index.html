@@ -100,6 +100,16 @@
     .toggle input { width: 26px; height: 26px; accent-color: var(--accent); flex: none; }
     .toggle small { display: block; color: var(--muted); font-size: 13px; }
     .field span { flex: none; }
+    .field select {
+      flex: 1;
+      min-width: 0;
+      font: inherit;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid #33404a;
+      background: var(--bg);
+      color: var(--fg);
+    }
     .field input {
       flex: 1;
       min-width: 0;
@@ -142,6 +152,10 @@
       <label class="toggle">
         <input id="depthToggle" type="checkbox" />
         <span>Depth lidar <small>(beta: sees tables &amp; clutter, Android only)</small></span>
+      </label>
+      <label class="field">
+        <span>Map</span>
+        <select id="mapPick"></select>
       </label>
       <label class="field">
         <span>Device name</span>

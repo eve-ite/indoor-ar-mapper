@@ -23,6 +23,11 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 app = FastAPI(title="Indoor AR Mapper")
 
+import maps  # noqa: E402  (maps of locations: /api/maps)
+
+maps.init(SCANS_DIR)
+app.include_router(maps.router)
+
 # Lets the static pages live on another host later (GitHub/Cloudflare Pages).
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 

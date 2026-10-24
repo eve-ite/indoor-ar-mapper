@@ -115,6 +115,15 @@
     .legend + .legend { margin-top: 4px; }
     #stats { font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
     #err { color: var(--bad); }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+    .tabs button { font: 600 13px system-ui, sans-serif; padding: 7px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+    .tabs button.active { background: var(--accent); color: #fff; }
+    .tabs button[data-kind="sim"].active { background: #b45309; }
+    .row-btns { display: flex; gap: 6px; margin: 4px 0 6px; }
+    #newMapForm { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 6px; }
+    #newMapName { width: 100%; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); margin-bottom: 6px; }
+    #newMapScans { max-height: 160px; overflow-y: auto; margin: 4px 0; }
+    #newMapScans label { display: flex; gap: 6px; font-size: 12px; align-items: center; }
     .label-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-bottom: 4px; color: var(--fg); font-size: 13px; }
     .label-row button, .small-btn { font: inherit; font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
     .small-btn.active { border-color: var(--accent); color: var(--accent); }
@@ -175,7 +184,30 @@
       <button data-mode="debug">Debug</button>
     </div>
     <section>
-      <h2>Scans on server</h2>
+      <div id="kindTabs" class="tabs">
+        <button data-kind="real" class="active" type="button">Real data</button>
+        <button data-kind="sim" type="button">Simulated</button>
+      </div>
+      <h2>Map</h2>
+      <select id="mapSelect"></select>
+      <div class="row-btns">
+        <button id="renameMap" class="small-btn" type="button">Rename</button>
+        <button id="newMap" class="small-btn" type="button">+ New map</button>
+      </div>
+      <div id="newMapForm" hidden>
+        <input id="newMapName" type="text" placeholder="Map name (e.g. Hall B)" />
+        <div class="note">Scans in this map, oldest first:</div>
+        <div id="newMapScans"></div>
+        <label class="check"><input id="newMapChain" type="checkbox" checked /> each scan continues the previous one</label>
+        <div class="row-btns">
+          <button id="newMapCreate" class="small-btn" type="button">Create</button>
+          <button id="newMapCancel" class="small-btn" type="button">Cancel</button>
+        </div>
+      </div>
+      <div id="mapNote" class="note"></div>
+    </section>
+    <section>
+      <h2>Single scans</h2>
       <div id="scans">loading…</div>
     </section>
     <section>
@@ -195,9 +227,8 @@
       <div class="note">Display only: routes still avoid furniture.</div>
     </section>
     <section id="chain" hidden>
-      <h2>Chain</h2>
-      <div id="chainList" class="note"></div>
-      <label class="check"><input id="combine" type="checkbox" /> combine chain into one map</label>
+      <h2>Map alignment</h2>
+      <div id="chainList" class="note" style="white-space: pre-line"></div>
       <label class="check"><input id="autoAlign" type="checkbox" /> auto-align overlaps (experimental)</label>
       <select id="chainLink"></select>
       <label class="slider">Nudge turn (°) <output id="nudgeYawV"></output>

@@ -186,3 +186,26 @@ Furniture moves after scanning. The nav app should notice obstacles on the route
 - **Real vs simulated:** the server marks scans with device `synthetic` (or `"simulated": true`,
   which the generator now writes) as simulated. The viewer shows **REAL · device** or
   **SIMULATED** badges in the scan list, and a chip on the map.
+
+## Maps (branch `scan-chaining`)
+
+A **map** is one location, made of one or more scans.
+
+- **Scan app:** Settings → **Map** picks the map, or **+ New map…** names one (e.g. "Hall B").
+  - Every scan records it in its header: `"map": {"id", "name"}`.
+  - **Continue** only offers to continue the last scan of the *same* map.
+  - With no map picked, a scan gets a new dated map automatically.
+- **Viewer:**
+  - **Real data | Simulated** tabs keep the two completely separate.
+  - The **Map** picker at the top opens a combined map; the newest real map opens by default.
+  - **Single scans** below show one scan on its own.
+  - **Rename** and **+ New map** (group existing scans, optionally "each continues the previous").
+  - **Map alignment** holds the per-link nudges and auto-align.
+  - URLs: `?map=<id>` or `?scan=<id>`.
+- **Placement** (`mergeMap` in `web/common/chain.js`):
+  - A scan that continues another in the map starts at that scan's end pose.
+  - Any other scan started on the map's start marker.
+  - Scans share one timeline from their `created` times, so "newest wins" sees the real gaps.
+- **Server** (`server/maps.py`): `GET /api/maps` merges three sources: maps declared by scans,
+  legacy chains (`chain-<root>`), and `scans/maps.json` (maps made in the viewer, plus renames).
+  `POST /api/maps` creates a map; `PUT /api/maps/{id}` renames or edits one.

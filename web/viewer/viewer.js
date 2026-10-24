@@ -3,7 +3,7 @@ import { parseScan } from '../common/jsonl.js';
 import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
 import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
 import { View3D } from './view3d.js';
-import { chainOrder, mergeChain } from '../common/chain.js';
+import { mergeMap } from '../common/chain.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -18,9 +18,12 @@ const ROUTE_COLOR = '#facc15';
 const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 
 let scan = null; // { name, header, frames, skipped, stats }
-let serverScans = []; // summaries from /api/scans (incl. continues/chain links)
-let chain = null; // { ids, texts: Map id -> JSONL } for the loaded scan's chain, or null
-let labelKey = null; // server id whose viewer-added labels apply (the scan, or the chain's root)
+let serverScans = []; // summaries from /api/scans (incl. continues/chain links, simulated)
+let serverMaps = []; // from /api/maps: [{ id, name, scans, links, simulated, updated }]
+let kind = 'real'; // 'real' | 'sim': real and simulated data are listed completely separately
+let currentMap = null; // the map being shown, or null for a single scan
+const texts = new Map(); // scan id -> JSONL text (cache)
+let labelKey = null; // server id whose viewer-added labels apply (the scan, or the map)
 let viewerLabels = []; // labels added in the viewer: [{ name, p: [x, y, z] }] in labelKey's coordinates
 let addingLabel = false;
 let grid = null;
@@ -34,48 +37,84 @@ let route = { a: null, b: null, path: null, info: '' }; // a/b are world [x, z]
 let view = { s: 80, ox: 0, oy: 0 }; // px per meter, screen offset (CSS px)
 
 // ---- loading ----
-async function loadServerList() {
-  const box = $('scans');
+async function loadLists() {
   try {
-    const res = await fetch(`${SERVER}/api/scans`);
-    if (!res.ok) throw new Error(res.status);
-    const list = await res.json();
-    serverScans = list;
-    if (!list.length) {
-      box.textContent = 'none uploaded yet';
-      return;
-    }
-    box.replaceChildren(
-      ...list.map((s) => {
-        const b = document.createElement('button');
-        b.dataset.id = s.id;
-        b.innerHTML = `<div><span class="sid"></span> <span class="badge"></span></div><div class="meta"></div>`;
-        b.querySelector('.sid').textContent = s.id;
-        const badge = b.querySelector('.badge');
-        badge.textContent = s.simulated ? 'SIMULATED' : `REAL${s.device && s.device !== 'unknown' ? ' · ' + s.device : ''}`;
-        badge.classList.add(s.simulated ? 'sim' : 'real');
-        b.lastChild.textContent = `${s.continues ? '↪ ' + s.continues + ' · ' : ''}${s.frames} frames · ${s.points} pts · ${s.created ? new Date(s.created).toLocaleString() : ''}`;
-        b.onclick = () => loadFromServer(s.id);
-        return b;
-      }),
-    );
+    const [scansRes, mapsRes] = await Promise.all([fetch(`${SERVER}/api/scans`), fetch(`${SERVER}/api/maps`)]);
+    if (!scansRes.ok) throw new Error(scansRes.status);
+    serverScans = await scansRes.json();
+    serverMaps = mapsRes.ok ? await mapsRes.json() : [];
   } catch {
-    box.textContent = 'server not reachable: drop a file instead';
+    $('scans').textContent = 'server not reachable: drop a file instead';
+    serverScans = serverMaps = [];
   }
+  renderLists();
 }
 
-// fromUrl: the scan named in ?scan= on page load, the only time ?combine=1 applies. A click in the
-// list shows just that scan (re-reading ?combine on every click snapped back to the combined map).
-async function loadFromServer(id, { fromUrl = false } = {}) {
-  try {
+const ofKind = (list) => list.filter((x) => !!x.simulated === (kind === 'sim'));
+
+function renderLists() {
+  for (const b of document.querySelectorAll('#kindTabs button')) b.classList.toggle('active', b.dataset.kind === kind);
+  // Map picker
+  const maps = ofKind(serverMaps);
+  $('mapSelect').replaceChildren(
+    ...(!maps.length
+      ? [Object.assign(document.createElement('option'), { value: '', textContent: 'no maps yet' })]
+      : !currentMap
+        ? [Object.assign(document.createElement('option'), { value: '', textContent: '— single scan —' })]
+        : []),
+    ...maps.map((m) =>
+      Object.assign(document.createElement('option'), {
+        value: m.id,
+        textContent: `${m.name} · ${m.scans.length} scan${m.scans.length > 1 ? 's' : ''}`,
+      }),
+    ),
+  );
+  if (currentMap && maps.some((m) => m.id === currentMap.id)) $('mapSelect').value = currentMap.id;
+  else if (!currentMap) $('mapSelect').value = '';
+  $('renameMap').disabled = !currentMap;
+  // Single scans
+  const box = $('scans');
+  const list = ofKind(serverScans);
+  if (!list.length) {
+    box.textContent = kind === 'sim' ? 'no simulated scans' : 'no real scans uploaded yet';
+    return;
+  }
+  box.replaceChildren(
+    ...list.map((sc) => {
+      const b = document.createElement('button');
+      b.dataset.id = sc.id;
+      b.innerHTML = `<div><span class="sid"></span> <span class="badge"></span></div><div class="meta"></div>`;
+      b.querySelector('.sid').textContent = sc.id;
+      const badge = b.querySelector('.badge');
+      badge.textContent = sc.simulated ? 'SIMULATED' : `REAL${sc.device && sc.device !== 'unknown' ? ' · ' + sc.device : ''}`;
+      badge.classList.add(sc.simulated ? 'sim' : 'real');
+      b.lastChild.textContent = `${sc.continues ? '↪ ' + sc.continues + ' · ' : ''}${sc.frames} frames · ${sc.points} pts · ${sc.created ? new Date(sc.created).toLocaleString() : ''}`;
+      b.classList.toggle('active', !currentMap && scan?.name === sc.id);
+      b.onclick = () => loadFromServer(sc.id);
+      return b;
+    }),
+  );
+}
+
+async function fetchText(id) {
+  if (!texts.has(id)) {
     const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
-    if (!res.ok) throw new Error(`${res.status}`);
-    const text = await res.text();
+    if (!res.ok) throw new Error(`${id}: ${res.status}`);
+    texts.set(id, await res.text());
+  }
+  return texts.get(id);
+}
+
+// One scan on its own (its own coordinates).
+async function loadFromServer(id) {
+  try {
+    const text = await fetchText(id);
+    currentMap = null;
+    $('chain').hidden = true;
     labelKey = id;
     setScan(id, text);
     loadViewerLabels();
-    document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-    setupChain(id, text, fromUrl);
+    renderLists();
   } catch (err) {
     $('err').textContent = `Could not load ${id}: ${err.message}`;
   }
@@ -88,7 +127,9 @@ function loadFile(file) {
     viewerLabels = [];
     setScan(file.name, reader.result);
     renderLabels();
-    setupChain(null);
+    currentMap = null;
+    $('chain').hidden = true;
+    renderLists();
   };
   reader.readAsText(file);
 }
@@ -139,59 +180,55 @@ const saveNudges = (n) => {
   } catch {}
 };
 
-function setupChain(id, text, fromUrl = false) {
-  const ids = id ? chainOrder(serverScans, id) : [];
-  chain = ids.length > 1 ? { ids, texts: new Map(id && text ? [[id, text]] : []), loadedId: id } : null;
-  $('chain').hidden = !chain;
-  if (!chain) return;
-  $('chainList').textContent = ids.join(' → ');
-  $('combine').checked = fromUrl && params.get('combine') === '1';
-  $('chainLink').replaceChildren(
-    ...ids.slice(1).map((cid, k) => Object.assign(document.createElement('option'), { value: cid, textContent: `${ids[k]} → ${cid}` })),
-  );
-  syncNudgeSliders();
-  if ($('combine').checked) combineChain();
-  else $('chainInfo').textContent = 'Tick Combine to stitch these into one map.';
-}
-
-async function combineChain({ keepView = false } = {}) {
-  const c = chain;
-  if (!c) return;
-  for (const cid of c.ids) {
-    if (c.texts.has(cid)) continue;
-    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(cid)}`);
-    if (!res.ok) throw new Error(`${cid}: ${res.status}`);
-    c.texts.set(cid, await res.text());
-    if (chain !== c) return; // another scan was opened while this chain loaded
+// ---- maps: one location = one or more scans, placed by their "continues" links ----
+// keepView: re-render in place (nudging) instead of resetting the camera/route.
+async function openMap(id, { keepView = false } = {}) {
+  const m = serverMaps.find((x) => x.id === id);
+  if (!m) return;
+  currentMap = m;
+  $('mapNote').textContent = `loading ${m.scans.length} scan(s)…`;
+  const list = [];
+  for (const sid of m.scans) {
+    list.push(await fetchText(sid));
+    if (currentMap !== m) return; // another map/scan was opened meanwhile
   }
-  if (chain !== c || !$('combine').checked) return;
-  const parsed = chain.ids.map((cid) => parseScan(chain.texts.get(cid)));
+  const parsed = list.map(parseScan);
   // Nudges saved in the scan files (continues_nudge) are the defaults; this browser's slider tweaks win.
   const fileNudges = Object.fromEntries(parsed.filter((p) => p.header?.continues_nudge).map((p) => [p.header.session_id, p.header.continues_nudge]));
   const nudges = { ...fileNudges, ...loadNudges() };
-  const m = mergeChain(parsed, { refine: $('autoAlign').checked, nudges });
-  syncNudgeSliders(); // texts are loaded now, so file nudges can show
-  setParsed(`chain of ${chain.ids.length}`, { header: parsed[0].header, frames: m.frames, keyframes: m.keyframes, labels: m.labels, skipped: 0 }, { keepView });
-  if (labelKey !== chain.ids[0]) {
-    labelKey = chain.ids[0]; // combined map = the root scan's coordinates
+  const merged = mergeMap(parsed, { refine: $('autoAlign').checked, nudges, links: m.links || {} });
+  setParsed(m.name, { header: parsed[0].header, frames: merged.frames, keyframes: merged.keyframes, labels: merged.labels, skipped: 0 }, { keepView });
+  if (labelKey !== m.id) {
+    labelKey = m.id; // viewer labels for a map live under the map's id, in its coordinates
     loadViewerLabels();
   }
-  const nudged = (id) => (nudges[id] && (nudges[id].yawDeg || nudges[id].dx || nudges[id].dz) ? ' + manual nudge' : '');
-  $('chainInfo').textContent = m.links
-    .map((l) => {
-      if (!l.refine) return `${l.id}: placed by floor mark${nudged(l.id)}`;
-      if (l.refine.used) {
-        const c = l.refine.correction;
-        return `${l.id}: auto-aligned (${c.yawDeg}°, ${c.dx} m, ${c.dz} m)${nudged(l.id)}`;
-      }
-      return `${l.id}: kept floor-mark placement (${l.refine.reason})${nudged(l.id)}`;
-    })
-    .join('\n');
+  $('mapNote').textContent = `${m.scans.length} scan(s) · last scanned ${new Date(m.updated).toLocaleString()}`;
+  // Alignment panel: one entry per link (scan continuing another)
+  $('chain').hidden = !merged.links.length;
+  if (merged.links.length) {
+    const keep = $('chainLink').value;
+    $('chainList').textContent = merged.links.map((l) => `${l.parent} → ${l.id}`).join('\n');
+    $('chainLink').replaceChildren(...merged.links.map((l) => Object.assign(document.createElement('option'), { value: l.id, textContent: `${l.parent} → ${l.id}` })));
+    if (merged.links.some((l) => l.id === keep)) $('chainLink').value = keep;
+    syncNudgeSliders();
+    const nudged = (sid) => (nudges[sid] && (nudges[sid].yawDeg || nudges[sid].dx || nudges[sid].dz) ? ' + manual nudge' : '');
+    $('chainInfo').textContent = merged.links
+      .map((l) => {
+        if (!l.refine) return `${l.id}: placed by floor mark${nudged(l.id)}`;
+        if (l.refine.used) {
+          const c = l.refine.correction;
+          return `${l.id}: auto-aligned (${c.yawDeg}°, ${c.dx} m, ${c.dz} m)${nudged(l.id)}`;
+        }
+        return `${l.id}: kept floor-mark placement (${l.refine.reason})${nudged(l.id)}`;
+      })
+      .join('\n');
+  }
+  renderLists();
 }
 
 function syncNudgeSliders() {
   const id = $('chainLink').value;
-  const fromFile = chain?.texts.has(id) ? parseScan(chain.texts.get(id)).header?.continues_nudge : null;
+  const fromFile = texts.has(id) ? parseScan(texts.get(id)).header?.continues_nudge : null;
   const n = loadNudges()[id] || fromFile || {};
   for (const [k, def] of [['nudgeYaw', 'yawDeg'], ['nudgeDx', 'dx'], ['nudgeDz', 'dz']]) {
     $(k).value = n[def] ?? 0;
@@ -206,10 +243,73 @@ function onNudge() {
   saveNudges(all);
   for (const k of ['nudgeYaw', 'nudgeDx', 'nudgeDz']) $(`${k}V`).textContent = $(k).value;
   clearTimeout(nudgeTimer);
-  if ($('combine').checked) nudgeTimer = setTimeout(() => combineChain({ keepView: true }).catch(showChainErr), 120);
+  if (currentMap) nudgeTimer = setTimeout(() => openMap(currentMap.id, { keepView: true }).catch(showChainErr), 120);
 }
 
-const showChainErr = (err) => ($('chainInfo').textContent = `Couldn't combine: ${err.message}`);
+const showChainErr = (err) => ($('chainInfo').textContent = `Couldn't build the map: ${err.message}`);
+
+// New map from existing scans (e.g. scanned before the app had map picking)
+function showNewMapForm() {
+  $('newMapForm').hidden = false;
+  $('newMapName').value = '';
+  const list = ofKind(serverScans).slice().sort((a, b) => ((a.created || '') < (b.created || '') ? -1 : 1));
+  $('newMapScans').replaceChildren(
+    ...list.map((sc) => {
+      const l = document.createElement('label');
+      l.innerHTML = '<input type="checkbox" /> <span></span>';
+      l.querySelector('input').value = sc.id;
+      l.querySelector('span').textContent = `${sc.id} · ${sc.created ? new Date(sc.created).toLocaleString() : ''}`;
+      return l;
+    }),
+  );
+  $('newMapName').focus();
+}
+
+async function createMap() {
+  const name = $('newMapName').value.trim();
+  const scans = [...document.querySelectorAll('#newMapScans input:checked')].map((i) => i.value);
+  if (!name || !scans.length) return ($('mapNote').textContent = 'Give the map a name and tick at least one scan.');
+  const res = await fetch(`${SERVER}/api/maps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, scans, chain_in_order: $('newMapChain').checked }),
+  });
+  if (!res.ok) return ($('mapNote').textContent = `Couldn't create the map: ${await res.text()}`);
+  const { id } = await res.json();
+  $('newMapForm').hidden = true;
+  await loadLists();
+  openMap(id).catch(showChainErr);
+}
+
+async function renameMap() {
+  if (!currentMap) return;
+  const name = (prompt('Map name:', currentMap.name) || '').trim();
+  if (!name || name === currentMap.name) return;
+  const res = await fetch(`${SERVER}/api/maps/${encodeURIComponent(currentMap.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) return ($('mapNote').textContent = `Couldn't rename: ${await res.text()}`);
+  const id = currentMap.id;
+  await loadLists();
+  currentMap = serverMaps.find((m) => m.id === id) || currentMap;
+  if (scan) {
+    scan.name = name;
+    renderStats();
+  }
+  renderLists();
+}
+
+// Default view: ?scan= or ?map= if given, else the newest map of this kind, else its newest scan.
+async function openDefault() {
+  const maps = ofKind(serverMaps), scans = ofKind(serverScans);
+  if (maps.length) return openMap(maps[0].id);
+  if (scans.length) return loadFromServer(scans[0].id);
+  scan = null;
+  currentMap = null;
+  draw();
+}
 
 // ---- grid ----
 function opts() {
@@ -793,16 +893,21 @@ for (const k of SLIDERS) {
   });
 }
 for (const id of ['showGrid', 'showPts', 'showTraj', 'mapMode']) $(id).addEventListener('change', draw);
-$('combine').addEventListener('change', () => {
-  if ($('combine').checked) combineChain().catch(showChainErr);
-  else if (chain) {
-    labelKey = chain.loadedId;
-    setScan(chain.loadedId, chain.texts.get(chain.loadedId));
-    loadViewerLabels();
-    $('chainInfo').textContent = 'Showing one scan.';
-  }
-});
-$('autoAlign').addEventListener('change', () => $('combine').checked && combineChain({ keepView: true }).catch(showChainErr));
+for (const b of document.querySelectorAll('#kindTabs button')) {
+  b.onclick = () => {
+    if (kind === b.dataset.kind) return;
+    kind = b.dataset.kind;
+    currentMap = null;
+    renderLists();
+    openDefault().catch(showChainErr);
+  };
+}
+$('mapSelect').addEventListener('change', () => $('mapSelect').value && openMap($('mapSelect').value).catch(showChainErr));
+$('renameMap').onclick = () => renameMap().catch(showChainErr);
+$('newMap').onclick = showNewMapForm;
+$('newMapCancel').onclick = () => ($('newMapForm').hidden = true);
+$('newMapCreate').onclick = () => createMap().catch(showChainErr);
+$('autoAlign').addEventListener('change', () => currentMap && openMap(currentMap.id, { keepView: true }).catch(showChainErr));
 $('chainLink').addEventListener('change', syncNudgeSliders);
 for (const k of ['nudgeYaw', 'nudgeDx', 'nudgeDz']) $(k).addEventListener('input', onNudge);
 $('nudgeReset').addEventListener('click', () => {
@@ -810,7 +915,7 @@ $('nudgeReset').addEventListener('click', () => {
   delete all[$('chainLink').value];
   saveNudges(all);
   syncNudgeSliders();
-  if ($('combine').checked) combineChain({ keepView: true }).catch(showChainErr);
+  if (currentMap) openMap(currentMap.id, { keepView: true }).catch(showChainErr);
 });
 $('profile').addEventListener('change', () => {
   applyProfile();
@@ -827,6 +932,17 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 });
 
 resize();
-loadServerList().then(() => {
-  if (params.get('scan')) loadFromServer(params.get('scan'), { fromUrl: true });
+loadLists().then(() => {
+  const want = (x) => serverScans.find((sc) => sc.id === x) || serverMaps.find((m) => m.id === x);
+  if (params.get('map') && want(params.get('map'))) {
+    kind = serverMaps.find((m) => m.id === params.get('map')).simulated ? 'sim' : 'real';
+    renderLists();
+    return openMap(params.get('map'));
+  }
+  if (params.get('scan') && want(params.get('scan'))) {
+    kind = serverScans.find((sc) => sc.id === params.get('scan')).simulated ? 'sim' : 'real';
+    renderLists();
+    return loadFromServer(params.get('scan'));
+  }
+  return openDefault();
 });

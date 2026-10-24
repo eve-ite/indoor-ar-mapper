@@ -199,50 +199,105 @@ export function nudgeAbout(px, pz, { yawDeg = 0, dx = 0, dz = 0 } = {}) {
   return compose({ yaw: 0, tx: px + dx, tz: pz + dz }, compose({ yaw, tx: 0, tz: 0 }, { yaw: 0, tx: -px, tz: -pz }));
 }
 
-// scans: parsed scans in chain order (root first), each { header, frames, keyframes? }.
-// refine: try automatic overlap alignment (conservative; off by default).
-// nudges: { [childSessionId]: { yawDeg, dx, dz } } manual corrections about each handover point.
-// Returns { frames, keyframes, links: [{ id, T, refine, pivot }] } all in the root's coordinates.
-export function mergeChain(scans, { refine = false, nudges = {} } = {}) {
-  const root = scans[0];
-  let frames = root.frames.slice();
-  let keyframes = (root.keyframes || []).slice();
-  let labels = (root.labels || []).map((l) => ({ ...l, scan: root.header?.session_id }));
-  const links = [];
-  let prev = { frames: root.frames, floors: floorPerFrame(root.frames), Tprev: { yaw: 0, tx: 0, tz: 0 }, dyPrev: 0 };
-  let tEnd = frames.at(-1)?.t ?? 0;
-
-  for (const scan of scans.slice(1)) {
-    const floors = floorPerFrame(scan.frames);
-    // Link in the previous scan's own coordinates, then chain onto the root.
-    let T = linkTransform(prev.frames.at(-1), scan.frames[0]);
-    let refineInfo = null;
-    if (refine) {
-      refineInfo = refineLink({ frames: prev.frames, floors: prev.floors }, { frames: scan.frames, floors }, T);
-      T = refineInfo.T;
+// A map = scans of one location, all in the first scan's coordinates.
+//   scans: parsed scans ({ header, frames, keyframes?, labels? }), oldest first.
+//   links: { [childId]: parentId } extra "continues" links (e.g. set when a map is made in the
+//          viewer); a scan's own header.continues is used otherwise.
+//   A scan continuing another in the map is placed at that scan's end pose (+ refine / nudge);
+//   any other scan started on the map's start marker, so it's placed as-is.
+//   Time: scans are put on one timeline from their header.created times (so newest-wins sees
+//   the real gap between visits), never overlapping.
+// Returns { frames, keyframes, labels, links: [{ id, parent, T, refine, pivot }] }.
+export function mergeMap(scans, { refine = false, nudges = {}, links: extraLinks = {} } = {}) {
+  const idOf = (s, k) => s.header?.session_id ?? `scan${k}`;
+  const ids = scans.map(idOf);
+  const inMap = new Set(ids);
+  const parentOf = (s, k) => {
+    const p = extraLinks[ids[k]] ?? s.header?.continues;
+    return p && inMap.has(p) && p !== ids[k] ? p : null;
+  };
+  // Parents before children (input is oldest-first, but don't rely on it).
+  const pending = scans.map((s, k) => k);
+  const order = [];
+  const done = new Set();
+  while (pending.length) {
+    const before = pending.length;
+    for (let j = 0; j < pending.length; j++) {
+      const k = pending[j];
+      const par = parentOf(scans[k], k);
+      if (!par || done.has(par)) {
+        order.push(k);
+        done.add(ids[k]);
+        pending.splice(j--, 1);
+      }
     }
-    const id = scan.header?.session_id;
-    // Handover point in the previous scan's coordinates (where this scan started).
-    const pivot = apply(T, scan.frames[0].p[0], scan.frames[0].p[2]);
-    if (nudges[id]) T = compose(nudgeAbout(pivot[0], pivot[1], nudges[id]), T);
-    const Troot = compose(prev.Tprev, T);
-    // Heights: line the child's floor up with the previous scan's floor at the handover.
-    const dy = prev.dyPrev + (prev.floors.at(-1) - floors[0]);
-    const dt = tEnd + 1 - scan.frames[0].t; // keep time increasing across the chain
-    const moved = scan.frames.map((f) => transformFrame(f, Troot, dy, dt));
+    if (pending.length === before) {
+      order.push(...pending.splice(0)); // a cycle: treat the rest as roots
+    }
+  }
+
+  const base = Date.parse(scans[order[0]]?.header?.created);
+  const placed = new Map(); // id -> { frames, floors, T, dy }
+  let frames = [], keyframes = [], labels = [];
+  const outLinks = [];
+  let tEnd = -Infinity;
+  let rootFloor = null;
+
+  for (const k of order) {
+    const scan = scans[k];
+    const id = ids[k];
+    if (!scan.frames.length) continue;
+    const floors = floorPerFrame(scan.frames);
+    const par = parentOf(scan, k);
+    let T = { yaw: 0, tx: 0, tz: 0 };
+    let dy = 0;
+    if (par && placed.has(par)) {
+      const P = placed.get(par);
+      // Link in the parent's own coordinates, then onto the map's.
+      let L = linkTransform(P.frames.at(-1), scan.frames[0]);
+      let refineInfo = null;
+      if (refine) {
+        refineInfo = refineLink({ frames: P.frames, floors: P.floors }, { frames: scan.frames, floors }, L);
+        L = refineInfo.T;
+      }
+      // Handover point in the parent's coordinates (where this scan started).
+      const pivot = apply(L, scan.frames[0].p[0], scan.frames[0].p[2]);
+      if (nudges[id]) L = compose(nudgeAbout(pivot[0], pivot[1], nudges[id]), L);
+      T = compose(P.T, L);
+      // Heights: line the child's floor up with the parent's floor at the handover.
+      dy = P.dy + (P.floors.at(-1) - floors[0]);
+      outLinks.push({ id, parent: par, T, refine: refineInfo, pivot: apply(P.T, pivot[0], pivot[1]) });
+    } else if (rootFloor !== null) {
+      dy = rootFloor - floors[0]; // another start from the marker: same floor as the first scan
+    }
+    if (rootFloor === null) rootFloor = floors[0];
+
+    // Timeline: seconds since the first scan started, from header.created when available.
+    const created = (Date.parse(scan.header?.created) - base) / 1000;
+    let dt = Number.isFinite(created) ? created : tEnd + 1 - scan.frames[0].t;
+    if (scan.frames[0].t + dt <= tEnd) dt = tEnd + 1 - scan.frames[0].t; // never overlap
+    const moved = scan.frames.map((f) => transformFrame(f, T, dy, dt));
     frames = frames.concat(moved);
-    keyframes = keyframes.concat((scan.keyframes || []).map((k) => ({ ...transformFrame(k, Troot, dy, dt), scan: id })));
+    keyframes = keyframes.concat((scan.keyframes || []).map((kf) => ({ ...transformFrame(kf, T, dy, dt), scan: id })));
     labels = labels.concat(
       (scan.labels || []).map((l) => {
-        const [x, z] = apply(Troot, l.p[0], l.p[2]);
+        const [x, z] = apply(T, l.p[0], l.p[2]);
         return { ...l, t: r3(l.t + dt), p: [r3(x), r3(l.p[1] + dy), r3(z)], scan: id };
       }),
     );
-    links.push({ id, T: Troot, refine: refineInfo, pivot: apply(prev.Tprev, pivot[0], pivot[1]) });
-    prev = { frames: scan.frames, floors, Tprev: Troot, dyPrev: dy };
-    tEnd = moved.at(-1)?.t ?? tEnd;
+    placed.set(id, { frames: scan.frames, floors, T, dy });
+    tEnd = Math.max(tEnd, moved.at(-1).t);
   }
-  return { frames, keyframes, labels, links };
+  return { frames, keyframes, labels, links: outLinks };
+}
+
+// A linear chain: each scan continues the one before it (root first).
+export function mergeChain(scans, opts = {}) {
+  const links = {};
+  scans.forEach((s, k) => {
+    if (k) links[s.header?.session_id ?? `scan${k}`] = scans[k - 1].header?.session_id ?? `scan${k - 1}`;
+  });
+  return mergeMap(scans, { ...opts, links: { ...links, ...(opts.links || {}) } });
 }
 
 // Order a chain from server summaries: [{ id, continues }] -> ids root..leaf for the chain of `id`.
