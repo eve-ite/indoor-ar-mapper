@@ -64,7 +64,9 @@ async function loadServerList() {
   }
 }
 
-async function loadFromServer(id) {
+// fromUrl: the scan named in ?scan= on page load, the only time ?combine=1 applies. A click in the
+// list shows just that scan (re-reading ?combine on every click snapped back to the combined map).
+async function loadFromServer(id, { fromUrl = false } = {}) {
   try {
     const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error(`${res.status}`);
@@ -73,7 +75,7 @@ async function loadFromServer(id) {
     setScan(id, text);
     loadViewerLabels();
     document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
-    setupChain(id, text);
+    setupChain(id, text, fromUrl);
   } catch (err) {
     $('err').textContent = `Could not load ${id}: ${err.message}`;
   }
@@ -137,13 +139,13 @@ const saveNudges = (n) => {
   } catch {}
 };
 
-function setupChain(id, text) {
+function setupChain(id, text, fromUrl = false) {
   const ids = id ? chainOrder(serverScans, id) : [];
   chain = ids.length > 1 ? { ids, texts: new Map(id && text ? [[id, text]] : []), loadedId: id } : null;
   $('chain').hidden = !chain;
   if (!chain) return;
   $('chainList').textContent = ids.join(' → ');
-  $('combine').checked = params.get('combine') === '1';
+  $('combine').checked = fromUrl && params.get('combine') === '1';
   $('chainLink').replaceChildren(
     ...ids.slice(1).map((cid, k) => Object.assign(document.createElement('option'), { value: cid, textContent: `${ids[k]} → ${cid}` })),
   );
@@ -826,5 +828,5 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 
 resize();
 loadServerList().then(() => {
-  if (params.get('scan')) loadFromServer(params.get('scan'));
+  if (params.get('scan')) loadFromServer(params.get('scan'), { fromUrl: true });
 });
