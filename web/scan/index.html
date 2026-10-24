@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>AR Scan</title>
+  <style>
+    :root {
+      --bg: #101418;
+      --fg: #eef2f5;
+      --muted: #9aa7b2;
+      --accent: #2bc4a8;
+      --warn: #f2b84b;
+      --bad: #ef6b6b;
+      --btn: #222a31;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.4 system-ui, -apple-system, Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    /* In AR the overlay sits on top of the camera feed, so it must be transparent. */
+    body.in-ar { background: transparent; }
+    #overlay { min-height: 100%; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    body.in-ar #overlay { justify-content: space-between; }
+    h1 { font-size: 20px; margin: 0; }
+    body.in-ar h1, body.in-ar .hide-in-ar { display: none; }
+    #status {
+      background: rgba(0, 0, 0, 0.55);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font: 15px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+    }
+    #msg { color: var(--muted); }
+    #msg.warn { color: var(--warn); }
+    #msg.bad { color: var(--bad); }
+    .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    button {
+      font: 600 20px system-ui, sans-serif;
+      padding: 18px 10px;
+      border: 0;
+      border-radius: 14px;
+      background: var(--btn);
+      color: var(--fg);
+      touch-action: manipulation;
+    }
+    button:disabled { opacity: 0.35; }
+    button.primary { background: var(--accent); color: #062a24; }
+    button.stop { background: var(--bad); color: #2a0606; }
+    .wide { grid-column: span 2; }
+    #saved { display: flex; flex-direction: column; gap: 8px; }
+    .saved-item {
+      background: var(--btn);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+    .saved-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .saved-item button { font-size: 14px; padding: 8px 10px; border-radius: 8px; background: #33404a; }
+    .tip { color: var(--muted); font-size: 14px; margin: 0; }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <h1>Indoor AR Mapper · scan</h1>
+    <div id="status">checking device…</div>
+    <p id="msg"></p>
+    <div class="buttons">
+      <button id="start" class="primary wide" disabled>Start scan</button>
+      <button id="stop" class="stop wide" hidden>Stop</button>
+      <button id="download" class="hide-in-ar" disabled>Download</button>
+      <button id="upload" class="hide-in-ar" disabled>Upload</button>
+    </div>
+    <p class="tip hide-in-ar">
+      Stand on the start marker facing the agreed direction, then tap Start.
+      Move slowly and sideways a bit so walls get detected. Scans save on the phone as you go;
+      upload whenever the network cooperates.
+    </p>
+    <div class="hide-in-ar">
+      <h2 class="tip">Saved on this phone</h2>
+      <div id="saved"></div>
+    </div>
+  </div>
+  <script type="module" src="./scan.js"></script>
+</body>
+</html>

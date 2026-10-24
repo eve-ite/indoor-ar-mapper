@@ -1,0 +1,6 @@
+scans/*
+!scans/.gitkeep
+.venv/
+__pycache__/
+*.pyc
+server/.venv/

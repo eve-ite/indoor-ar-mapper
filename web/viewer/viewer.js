@@ -1,0 +1,315 @@
+// M2 map viewer: loads a scan JSONL (server list or local file) and draws grid + points + trajectory.
+import { parseScan } from '../common/jsonl.js';
+import { DEFAULTS, buildGrid, classifyHeight } from './grid.js';
+
+const params = new URLSearchParams(location.search);
+const SERVER = (params.get('server') || '').replace(/\/$/, '');
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('map');
+const ctx = canvas.getContext('2d');
+
+const SLIDERS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'maxRange'];
+const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
+
+let scan = null; // { name, header, frames, skipped, stats }
+let grid = null;
+let gridImage = null;
+let view = { s: 80, ox: 0, oy: 0 }; // px per meter, screen offset (CSS px)
+
+// ---- loading ----
+async function loadServerList() {
+  const box = $('scans');
+  try {
+    const res = await fetch(`${SERVER}/api/scans`);
+    if (!res.ok) throw new Error(res.status);
+    const list = await res.json();
+    if (!list.length) {
+      box.textContent = 'none uploaded yet';
+      return;
+    }
+    box.replaceChildren(
+      ...list.map((s) => {
+        const b = document.createElement('button');
+        b.dataset.id = s.id;
+        b.innerHTML = `<div></div><div class="meta"></div>`;
+        b.firstChild.textContent = s.id;
+        b.lastChild.textContent = `${s.frames} frames · ${s.points} pts · ${s.created ? new Date(s.created).toLocaleString() : ''}`;
+        b.onclick = () => loadFromServer(s.id);
+        return b;
+      }),
+    );
+  } catch {
+    box.textContent = 'server not reachable: drop a file instead';
+  }
+}
+
+async function loadFromServer(id) {
+  try {
+    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
+    if (!res.ok) throw new Error(`${res.status}`);
+    setScan(id, await res.text());
+    document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+  } catch (err) {
+    $('err').textContent = `Could not load ${id}: ${err.message}`;
+  }
+}
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => setScan(file.name, reader.result);
+  reader.readAsText(file);
+}
+
+function setScan(name, text) {
+  $('err').textContent = '';
+  const parsed = parseScan(text);
+  if (!parsed.frames.length) {
+    $('err').textContent = `${name}: no frames found${parsed.header ? '' : ' (and no header)'}`;
+    return;
+  }
+  scan = { name, ...parsed };
+  rebuild();
+  fit();
+}
+
+// ---- grid ----
+function opts() {
+  const o = {};
+  for (const k of SLIDERS) o[k] = parseFloat($(k).value);
+  return o;
+}
+
+function rebuild() {
+  if (!scan) return;
+  grid = buildGrid(scan.frames, opts());
+  gridImage = grid ? renderGridImage(grid) : null;
+  renderStats();
+  draw();
+}
+
+function cssColor(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function hexToRgb(hex) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+// One pixel per cell; scaled up with smoothing off when drawn.
+function renderGridImage(g) {
+  const off = document.createElement('canvas');
+  off.width = g.w;
+  off.height = g.h;
+  const octx = off.getContext('2d');
+  const img = octx.createImageData(g.w, g.h);
+  const occ = hexToRgb(cssColor('--fg'));
+  const free = hexToRgb(cssColor('--accent'));
+  for (let i = 0; i < g.L.length; i++) {
+    const l = g.L[i];
+    if (l === 0) continue;
+    const p = 1 / (1 + Math.exp(-l));
+    const j = i * 4;
+    if (p > 0.5) {
+      img.data.set(occ, j);
+      img.data[j + 3] = Math.round(255 * Math.min(1, (p - 0.5) * 2.2));
+    } else {
+      img.data.set(free, j);
+      img.data[j + 3] = Math.round(90 * Math.min(1, (0.5 - p) * 2.2));
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  return off;
+}
+
+function renderStats() {
+  const f = scan.frames;
+  const pts = f.reduce((n, fr) => n + (fr.pts?.length || 0), 0);
+  const tracking = {};
+  for (const fr of f) tracking[fr.tracking] = (tracking[fr.tracking] || 0) + 1;
+  let len = 0;
+  for (let i = 1; i < f.length; i++) len += Math.hypot(f[i].p[0] - f[i - 1].p[0], f[i].p[2] - f[i - 1].p[2]);
+  const h = scan.header || {};
+  const lines = [
+    `file      ${scan.name}`,
+    `device    ${h.device ?? '?'}`,
+    `created   ${h.created ?? '?'}`,
+    `frames    ${f.length}${scan.skipped ? `  (skipped ${scan.skipped} bad lines)` : ''}`,
+    `duration  ${(f.at(-1).t ?? 0).toFixed(1)} s`,
+    `path      ${len.toFixed(1)} m`,
+    `points    ${pts}`,
+    `tracking  ${Object.entries(tracking).map(([k, v]) => `${k}:${v}`).join(' ')}`,
+  ];
+  if (grid) {
+    const c = grid.counts;
+    lines.push(
+      `grid      ${grid.w}×${grid.h} @ ${grid.cell * 100} cm`,
+      `extent    ${(grid.w * grid.cell).toFixed(1)} × ${(grid.h * grid.cell).toFixed(1)} m`,
+      `hits      floor ${c.floor}  wall ${c.wall}  ignored ${c.ignored}`,
+    );
+  }
+  $('stats').textContent = lines.join('\n');
+}
+
+// ---- drawing ----
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  canvas.width = Math.round(r.width * dpr);
+  canvas.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function fit() {
+  if (!grid) return;
+  const r = canvas.getBoundingClientRect();
+  const wm = grid.w * grid.cell;
+  const hm = grid.h * grid.cell;
+  view.s = Math.min(r.width / wm, r.height / hm) * 0.92;
+  view.ox = (r.width - wm * view.s) / 2 - grid.minX * view.s;
+  view.oy = (r.height - hm * view.s) / 2 - grid.minZ * view.s;
+  draw();
+}
+
+// World X/Z -> screen. +X right, +Z down, so forward (-Z) points up.
+const sx = (x) => view.ox + x * view.s;
+const sy = (z) => view.oy + z * view.s;
+
+function draw() {
+  const r = canvas.getBoundingClientRect();
+  ctx.clearRect(0, 0, r.width, r.height);
+  if (!scan) return;
+
+  if ($('showGrid').checked && gridImage) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(gridImage, sx(grid.minX), sy(grid.minZ), grid.w * grid.cell * view.s, grid.h * grid.cell * view.s);
+  }
+
+  if ($('showPts').checked) {
+    const o = { ...DEFAULTS, ...opts() };
+    const size = Math.max(1.5, Math.min(4, view.s * 0.025));
+    for (const cls of ['other', 'floor', 'wall']) {
+      ctx.fillStyle = POINT_COLORS[cls];
+      ctx.globalAlpha = cls === 'wall' ? 0.8 : 0.45;
+      for (const f of scan.frames) {
+        for (const h of f.pts || []) {
+          if (classifyHeight(h[1], o) !== cls) continue;
+          ctx.fillRect(sx(h[0]) - size / 2, sy(h[2]) - size / 2, size, size);
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if ($('showTraj').checked) {
+    ctx.strokeStyle = '#e11d48';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    scan.frames.forEach((f, i) => (i ? ctx.lineTo(sx(f.p[0]), sy(f.p[2])) : ctx.moveTo(sx(f.p[0]), sy(f.p[2]))));
+    ctx.stroke();
+    const last = scan.frames.at(-1);
+    drawHeading(last);
+  }
+
+  drawStartMarker();
+  drawScaleBar(r);
+}
+
+// Heading arrow at the latest pose: rotate viewer forward (0,0,-1) by q, project to X/Z.
+function drawHeading(f) {
+  const [x, y, z, w] = f.q;
+  const fx = -(2 * (x * z + w * y));
+  const fz = -(1 - 2 * (x * x + y * y));
+  const n = Math.hypot(fx, fz) || 1;
+  const L = 18;
+  const px = sx(f.p[0]), py = sy(f.p[2]);
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(px + (fx / n) * L, py + (fz / n) * L);
+  ctx.stroke();
+  ctx.fillStyle = '#e11d48';
+  ctx.beginPath();
+  ctx.arc(px, py, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawStartMarker() {
+  const x = sx(0), y = sy(0), k = 8;
+  ctx.strokeStyle = cssColor('--accent');
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x - k, y - k); ctx.lineTo(x + k, y + k);
+  ctx.moveTo(x + k, y - k); ctx.lineTo(x - k, y + k);
+  ctx.stroke();
+}
+
+function drawScaleBar(r) {
+  const meters = [0.1, 0.25, 0.5, 1, 2, 5, 10].find((m) => m * view.s >= 60) ?? 10;
+  const len = meters * view.s;
+  const x = 16, y = r.height - 20;
+  ctx.strokeStyle = ctx.fillStyle = cssColor('--muted');
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, y - 5); ctx.lineTo(x, y); ctx.lineTo(x + len, y); ctx.lineTo(x + len, y - 5);
+  ctx.stroke();
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillText(meters >= 1 ? `${meters} m` : `${meters * 100} cm`, x + len + 6, y);
+}
+
+// ---- interaction ----
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => {
+  drag = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  view.ox = drag.ox + e.clientX - drag.x;
+  view.oy = drag.oy + e.clientY - drag.y;
+  draw();
+});
+canvas.addEventListener('pointerup', () => (drag = null));
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const mx = e.clientX - r.left, my = e.clientY - r.top;
+  const k = Math.exp(-e.deltaY * 0.0015);
+  view.ox = mx - (mx - view.ox) * k;
+  view.oy = my - (my - view.oy) * k;
+  view.s *= k;
+  draw();
+}, { passive: false });
+canvas.addEventListener('dblclick', fit);
+
+const drop = $('drop');
+drop.onclick = () => $('file').click();
+$('file').onchange = (e) => e.target.files[0] && loadFile(e.target.files[0]);
+for (const ev of ['dragenter', 'dragover']) {
+  document.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); });
+}
+for (const ev of ['dragleave', 'drop']) {
+  document.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); });
+}
+document.addEventListener('drop', (e) => e.dataTransfer.files[0] && loadFile(e.dataTransfer.files[0]));
+
+for (const k of SLIDERS) {
+  const input = $(k), out = $(`${k}V`);
+  input.value = DEFAULTS[k];
+  out.textContent = input.value;
+  input.addEventListener('input', () => {
+    out.textContent = input.value;
+    rebuild();
+  });
+}
+for (const id of ['showGrid', 'showPts', 'showTraj']) $(id).addEventListener('change', draw);
+window.addEventListener('resize', resize);
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (grid) gridImage = renderGridImage(grid);
+  draw();
+});
+
+resize();
+loadServerList();
+if (params.get('scan')) loadFromServer(params.get('scan'));
