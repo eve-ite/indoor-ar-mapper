@@ -35,6 +35,12 @@ car/                    M3 (branch car-m3): firmware/, teleop/, mock_car.py, tes
                         WIRING.md (wiring source of truth), README.md
 tools/make_synthetic.py synthetic room scans (--depth adds depth samples) for testing
 scans/                  uploaded scans (gitignored)
+
+branch textures-exploration (worktree .claude/worktrees/textures-exploration):
+TEXTURES_FINDINGS.md    research, budgets, nerfstudio mapping, Phase 3 status
+web/camtest/            standalone camera-access test page (offline after one visit)
+web/common/keyframes.js camera grab, intrinsics/pose/projection math, capture gate
+web/viewer/floorcolor.js floor coloured from photos (projection + occlusion)
 ```
 
 ## Status
@@ -42,9 +48,10 @@ scans/                  uploaded scans (gitignored)
 |---|---|
 | **M1** handheld scan | **Done, tested on the S23.** 28-ray hit-test fan (7 yaws × pitch 0/−10/−20/−30°), live hints (tilt, speed, side-to-side), IndexedDB crash recovery, download/upload. Optional **depth lidar** toggle (Settings) works on the S23 without flags. |
 | **M2** viewer | **Done.** Map mode is a 3D view: obstacles are blocks extruded to the scanned height, the floor is a plane with walked paths tinted, and click twice to plan an A* route. Debug mode is the 2D grid/points with tuning sliders. Person/RC-car profile auto-detected from the phone height. |
-| **M3** car drives | **Software done on branch `car-m3`, not merged.** Firmware compiles and flashes on the real board. Mock car + automated tests all pass (15/15 relay checks, 5/5 browser runs). **In progress:** switching the car's primary link to Bluetooth LE (see Car). |
+| **M3** car drives | **Software done on branch `car-m3`, not merged.** **Bluetooth LE is the primary link and is verified on the real board** (no motors wired yet): 20 Hz commands, 10 Hz telemetry, deadman stops 301 ms after the last command. A page disconnect is also caught by the deadman, because Windows holds the BLE link ~3 s. Teleop has a Connect Bluetooth button (Chrome/Edge). WiFi mode remains behind `CONTROL_LINK`. Mock + automated tests pass. **Gotcha:** init BLE from `setup()`, not the core-0 task, or the UART service is missing. |
 | **M4** car scan | Not started (needs the built car). |
 | **M5** navigation | Not started. A*, path smoothing and traversability already exist in `web/common/trav.js`, so it's mostly the AR side. |
+| **Textures** (bonus) | **Built on branch `textures-exploration`, not merged, not yet run on the S23.** Camera photos during scans (opt-in), photo frustums + photo-coloured floor in the viewer, nerfstudio export. Verified on synthetic scans only. See Textures below. |
 
 ## Key decisions so far (don't undo these without asking)
 - **Networking:** cloudflared quick tunnel with `--protocol http2` (TCP 443; venues often block
@@ -57,7 +64,13 @@ scans/                  uploaded scans (gitignored)
 - **Heights are relative to a tracked floor** (`common/floor.js`), never local-floor's y=0, which
   drifts and can start out wrong.
 - **Chrome hit-test only hits ARCore planes** (floor reliably, walls sometimes, clutter never).
-  Depth sees everything.
+  Depth sees everything. ARCore also reports phantom floor planes in the first seconds; the floor
+  tracker re-locks on a persistent height change.
+- **Keep the three.js depth patch in `scan.js`.** three r170 calls the *GPU* depth API every frame
+  when `depth-sensing` is on; on our CPU-depth session that throws and freezes the frame loop. The
+  patch makes `XRWebGLBinding.getDepthInformation` return null instead.
+- **Don't bump main's IndexedDB version** (`indoor-ar-mapper`): an older page can't open a newer
+  DB. New storage goes in a separate database (the textures branch uses `indoor-ar-mapper-keyframes`).
 - **Navigation uses traversability, not walls.** There are three tiers: walked corridor (proven, cheapest),
   floor seen (allowed, cost 4), obstacles/unknown (blocked). A cluttered hallway you walked
   through stays passable.
@@ -75,6 +88,27 @@ since session start.
 ```
 - `pts` = plane hits (exact heights per plane), `dpts` = depth samples (only when depth was on).
 - Missing `stats` = interrupted scan. Parsers must skip unknown types and a truncated last line.
+- Textures branch only: `{"type":"keyframe","t","p","q","intrinsics":{"fx","fy","cx","cy","w","h"},"img":"kf_0042.jpg"}`.
+  Intrinsics are in pixels with a top-left origin; p/q is the camera pose (`view.transform`). Photos
+  live in `scans/<id>_kf/`. Lines may arrive out of `t` order (written once the photo is stored).
+
+## Textures (branch `textures-exploration`)
+- **Findings** (`TEXTURES_FINDINGS.md`): WebXR raw camera access (`camera-access`) has been in Chrome
+  since 107, so it should be flag-free, but it's **unverified on the S23**. getUserMedia during AR is not a
+  path. Budget ~6–15 MB of 960 px JPEGs per room. Upload one PUT per photo, so it resumes.
+- **`/camtest/`**: pass/fail checklist, capture keyframe with a red-dot projection check,
+  getUserMedia probe. **It works offline after one visit** (service worker): results are saved on the
+  phone and shared via the share sheet (e.g. to Google Drive).
+- **Scan app**: Settings → "Camera photos" (or `?keyframes=1`), off by default. Capture is gated at
+  30 cm / 15° / 0.5 s and skipped while turning >40°/s. `renderer.resetState()` runs after every raw-GL grab.
+- **Viewer**: a Photos panel (shown only when a scan has photos) with camera frustums + thumbnails,
+  "colour the floor from photos", and an export link: `GET /api/scans/{id}/nerfstudio.zip`.
+- **Verified on synthetic data** (`make_synthetic.py --photos`): the Python render and the JS
+  projection agree to 0.002 px, floor tiles and the rug landmark land correctly, and the export
+  pose/pitch are correct.
+- **Pending, needs the phone:** whether `camera-access` is granted, whether readback comes out upside
+  down, grab ms, and three.js coexisting with the raw GL. **Next step:** in a short server window, open
+  `<tunnel>/camtest/` once so it caches, then test asynchronously.
 
 ## Car (M3)
 - **Board:** YD-ESP32-23 (ESP32-S3 N16R8, a DevKitC-1 clone), on the laptop's **COM11** (CH343 UART
@@ -107,6 +141,10 @@ Tests (no hardware needed):
 - `server/.venv/Scripts/python car/tests/test_car.py`
 - `node car/tests/teleop_e2e.mjs`
 - `python tools/make_synthetic.py scans/synthetic_depth.jsonl --depth`, then view it
+- Textures branch: `python tools/make_synthetic.py scans/synthetic_photos.jsonl --photos`, then open
+  the viewer with `?scan=synthetic_photos` and tick "colour the floor from photos". Server endpoints are
+  tested in-process (`uv run --no-project --with fastapi --with httpx2 python …` + `TestClient`).
+  Phone page: `<tunnel>/camtest/`.
 
 Dev tools:
 - `uv run --with pyserial car/tools/serial_tail.py COM11 --seconds 5`
@@ -124,7 +162,10 @@ Dev tools:
   you flash.
 - **Ports:** 8000 is the dev server. Tests use 8790/8791. **Windows reserves port 8765**, don't use it.
 - **Memory is tight on this laptop:** don't leave servers, tunnels or headless browsers running
-  when you're done.
+  when you're done. Claude Code kills idle background servers under memory pressure. When the user
+  needs the server for the phone, give them the commands to run in their own terminal.
+- **Worktree checkouts use CRLF line endings:** normalize before doing multi-line string edits in
+  scripts (git converts on commit, so diffs stay clean).
 - **Browser:** the user's default browser is **Brave, which disables Web Bluetooth**. Open BLE
   pages in Chrome/Edge (`chrome.exe <url>`).
 - Commit in small steps. End commit messages with
@@ -133,8 +174,8 @@ Dev tools:
 - Before handing back: run the tests for anything you touched and report pass/fail honestly.
 
 ## Backlog (good parallel tasks)
-1. **Car BLE primary link** (in progress on `car-m3`): BLE firmware mode plus Web Bluetooth in
-   teleop, with the deadman verified on the real board.
+1. **Car BLE primary link**: done on `car-m3`, waiting for the user's Chrome teleop check and the
+   merge. Next on the car: wire the motors and sensors (`car/WIRING.md` bring-up order), then M4.
 2. **M5 nav app** (`web/nav/`): load a scan, start on the start marker, run A* with
    `common/trav.js` (`astar`, `simplifyPath`), and draw three.js AR arrows along the path. Reuse the
    scan app's WebXR session setup.
@@ -147,9 +188,14 @@ Dev tools:
 7. **Car WiFi mode test** on a normal 2.4 GHz network (user will do this off-site).
 8. **Chassis:** 3D-print wheels, caster, phone clamp (mount it offset from the turning axis),
    power bank cradle.
+9. **Textures phone test + merge decision** (`textures-exploration`): run `/camtest/` and a scan with
+   Camera photos on the S23, fix whatever the phone reveals (e.g. a vertical flip), then decide
+   whether to merge. The colored top-down floor is the demo piece.
 
 ## Open questions
 - What does the iPhone fallback do?
 - Where do the pages and the API live with public HTTPS for the demo?
 - Venue wifi type (WPA2-Enterprise would block the car's WiFi mode; BLE avoids it).
 - Depth on by default after iOS testing?
+- Is `camera-access` flag-free on the S23, and does the readback need a vertical flip? (`/camtest/`
+  answers both.)
