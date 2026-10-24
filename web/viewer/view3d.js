@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 import { TRAV } from '../common/trav.js';
 import { close, dropSpecks } from './mapstyle.js';
+import { poseMatrix } from '../common/keyframes.js';
 
 const BLOCK = 2; // grid cells per block side (2 x 5 cm = 10 cm blocks)
 const MIN_OBSTACLE_CELLS = 10; // hide specks under 2.5 dm² (routing still sees them)
@@ -36,7 +37,9 @@ export class View3D {
 
     this.mapGroup = new THREE.Group();
     this.routeGroup = new THREE.Group();
-    this.scene.add(this.mapGroup, this.routeGroup);
+    this.photoGroup = new THREE.Group(); // keyframe frustums + thumbnails
+    this.scene.add(this.mapGroup, this.routeGroup, this.photoGroup);
+    this.floorColors = null; // RGBA per grid cell from photos, or null
 
     this.onPick = null;
     this.pickFloor();
@@ -107,7 +110,12 @@ export class View3D {
     const floorRGB = rgb(this.color('--map-floor'));
     const walkRGB = rgb(this.color('--map-road'));
     const known = close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2);
+    const photo = this.floorColors && this.floorColors.length === w * h * 4 ? this.floorColors : null;
     for (let i = 0; i < w * h; i++) {
+      if (photo && photo[i * 4 + 3]) {
+        img.data.set(photo.subarray(i * 4, i * 4 + 4), i * 4); // what the camera saw
+        continue;
+      }
       if (!known[i]) continue;
       img.data.set(trav.tier[i] === TRAV.WALKED ? walkRGB : floorRGB, i * 4);
       img.data[i * 4 + 3] = 255;
@@ -211,6 +219,56 @@ export class View3D {
     sc.far = span * 3;
     sc.updateProjectionMatrix();
     this.blockCount = blocks.length;
+    this.render();
+  }
+
+  // RGBA per grid cell (from floorcolor.js) or null; takes effect on the next setMap().
+  setFloorColors(rgba) {
+    this.floorColors = rgba;
+  }
+
+  // Keyframes as small camera frustums at their capture pose, with the photo on the far plane.
+  // urlFor(kf) -> image URL, or null when the photo isn't available (e.g. a dropped local file).
+  setKeyframes(keyframes, urlFor) {
+    this.clear(this.photoGroup);
+    if (!keyframes?.length) return this.render();
+    const D = 0.22; // m: frustum depth
+    const lineMat = new THREE.LineBasicMaterial({ color: this.color('--map-route') });
+    const loader = new THREE.TextureLoader();
+    for (const kf of keyframes) {
+      const K = kf.intrinsics;
+      const hw = (K.w / 2 / K.fx) * D, hh = (K.h / 2 / K.fy) * D; // half-size of the far plane
+      // Corners in camera space (camera looks down -Z), offset for an off-centre principal point.
+      const ox = ((K.w / 2 - K.cx) / K.fx) * D, oy = ((K.cy - K.h / 2) / K.fy) * D;
+      const c = [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]].map(([x, y]) => new THREE.Vector3(x + ox, y + oy, -D));
+      const o = new THREE.Vector3();
+      const pts = [o, c[0], o, c[1], o, c[2], o, c[3], c[0], c[1], c[1], c[2], c[2], c[3], c[3], c[0]];
+      const g = new THREE.Group();
+      g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
+      const url = urlFor(kf);
+      if (url) {
+        const quad = new THREE.Mesh(
+          new THREE.PlaneGeometry(2 * hw, 2 * hh),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.92 }),
+        );
+        quad.position.set(ox, oy, -D);
+        loader.load(url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          quad.material.map = tex;
+          quad.material.needsUpdate = true;
+          this.render();
+        });
+        g.add(quad);
+      }
+      g.matrixAutoUpdate = false;
+      g.matrix.fromArray(poseMatrix(kf.p, kf.q));
+      this.photoGroup.add(g);
+    }
+    this.render();
+  }
+
+  showKeyframes(on) {
+    this.photoGroup.visible = on;
     this.render();
   }
 

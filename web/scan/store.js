@@ -126,3 +126,90 @@ export function deleteSession(sessionId) {
     }),
   );
 }
+
+// ---- keyframe photos (textures branch) ----
+// A separate database so main's 'indoor-ar-mapper' DB keeps its version: bumping it would make
+// main's scan page fail to open it (VersionError) if both ever run on the same origin.
+let kfDbPromise = null;
+
+function openKfDb() {
+  if (!kfDbPromise) {
+    kfDbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open('indoor-ar-mapper-keyframes', 1);
+      req.onupgradeneeded = () => {
+        const os = req.result.createObjectStore('keyframes', { keyPath: ['session_id', 'name'] });
+        os.createIndex('session_id', 'session_id');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  return kfDbPromise;
+}
+
+async function softKf(fn, fallback) {
+  try {
+    return await fn(await openKfDb());
+  } catch (err) {
+    console.warn('keyframe store:', err);
+    return fallback;
+  }
+}
+
+// Resolves false (instead of throwing) when storage is full, so capture can stop with a message.
+export function putKeyframe(sessionId, name, blob) {
+  return softKf(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const t = db.transaction('keyframes', 'readwrite');
+        t.objectStore('keyframes').put({ session_id: sessionId, name, blob });
+        t.oncomplete = () => resolve(true);
+        t.onerror = () => reject(t.error);
+        t.onabort = () => reject(t.error);
+      }),
+    false,
+  );
+}
+
+export function listKeyframes(sessionId) {
+  return softKf(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const req = db.transaction('keyframes').objectStore('keyframes').index('session_id').getAll(IDBKeyRange.only(sessionId));
+        req.onsuccess = () => resolve(req.result.sort((a, b) => (a.name < b.name ? -1 : 1)));
+        req.onerror = () => reject(req.error);
+      }),
+    [],
+  );
+}
+
+export function countKeyframes(sessionId) {
+  return softKf(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const req = db.transaction('keyframes').objectStore('keyframes').index('session_id').count(IDBKeyRange.only(sessionId));
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      }),
+    0,
+  );
+}
+
+export function deleteKeyframes(sessionId) {
+  return softKf(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const t = db.transaction('keyframes', 'readwrite');
+        const cur = t.objectStore('keyframes').index('session_id').openKeyCursor(IDBKeyRange.only(sessionId));
+        cur.onsuccess = () => {
+          const c = cur.result;
+          if (c) {
+            t.objectStore('keyframes').delete(c.primaryKey);
+            c.continue();
+          }
+        };
+        t.oncomplete = () => resolve();
+        t.onerror = () => reject(t.error);
+      }),
+  );
+}

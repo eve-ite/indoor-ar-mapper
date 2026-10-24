@@ -2,6 +2,7 @@
 import * as THREE from '../vendor/three.module.min.js';
 import { APP_VERSION, r3, toLine } from '../common/jsonl.js';
 import { FloorTracker } from '../common/floor.js';
+import { CameraGrabber, KeyframeGate, encodeJpeg, intrinsicsFromProjection } from '../common/keyframes.js';
 import { DEPTH_COLS, DEPTH_MAX, DEPTH_MIN, DEPTH_ROWS, sampleDepth } from '../common/depth.js';
 import * as store from './store.js';
 
@@ -26,6 +27,13 @@ const SERVER = (params.get('server') || '').replace(/\/$/, '');
 let detectedDevice = 'unknown';
 // Depth lidar is opt-in (Settings toggle or ?depth=1) until it's been tried on more phones.
 let depthRequested = false; // captured when a scan starts
+// Camera keyframes are opt-in (Settings toggle or ?keyframes=1): WebXR camera-access photos with pose.
+let kfRequested = false; // captured when a scan starts
+let kfOn = false;
+let kfBinding = null;
+let kfGrabber = null;
+const KF_MAX_WIDTH = 960; // px; ~70-110 KB JPEGs (see TEXTURES_FINDINGS.md budget)
+const KF_JPEG_Q = 0.8;
 const DEPTH_EVERY = 2; // sample depth on every Nth recorded frame (5 Hz)
 const DEPTH_MAX_MS = 25; // pause depth sampling if it averages slower than this
 
@@ -40,6 +48,7 @@ const ui = {
   upload: $('upload'),
   saved: $('saved'),
   depth: $('depthToggle'),
+  keyframes: $('kfToggle'),
   device: $('deviceName'),
 };
 
@@ -52,17 +61,19 @@ function loadSettings() {
     saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
   } catch {}
   ui.depth.checked = params.has('depth') ? params.get('depth') === '1' : !!saved.depth;
+  ui.keyframes.checked = params.has('keyframes') ? params.get('keyframes') === '1' : !!saved.keyframes;
   ui.device.value = params.get('device') || saved.device || '';
 }
 
 function saveSettings() {
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ depth: ui.depth.checked, device: ui.device.value.trim() }));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ depth: ui.depth.checked, keyframes: ui.keyframes.checked, device: ui.device.value.trim() }));
   } catch {}
 }
 
 loadSettings();
 ui.depth.addEventListener('change', saveSettings);
+ui.keyframes.addEventListener('change', saveSettings);
 ui.device.addEventListener('change', saveSettings);
 
 // Chrome's reduced UA string says "K" for every Android model; Client Hints have the real one.
@@ -185,6 +196,11 @@ function renderStatus() {
       : `depth off${depthRequested ? ' (not granted)' : ''}\n`) +
     `frames ${rec.frames}  points ${rec.points}  hit ${hitPct}%\n` +
     `per-ray % ${perRay}\n` +
+    (kfRequested
+      ? kfOn
+        ? `photos ${rec.keyframes}${rec.kfStopped ? ' STOPPED' : ''}  ${rec.kfMs.toFixed(0)} ms${rec.kfNoCamera > 30 && !rec.keyframes ? '  (no camera image)' : ''}\n`
+        : 'photos off (camera access not granted)\n'
+      : '') +
     `saved ${rec.savedFrames}/${rec.frames}`;
 }
 
@@ -201,16 +217,19 @@ async function startScan() {
       domOverlay: { root: overlayRoot },
     };
     depthRequested = ui.depth.checked;
-    if (depthRequested) {
-      try {
+    kfRequested = ui.keyframes.checked;
+    if (depthRequested || kfRequested) {
+      const extra = { ...base, optionalFeatures: [...base.optionalFeatures] };
+      if (depthRequested) {
         // CPU path only (the GPU sample's shader failed on the S23).
-        session = await navigator.xr.requestSession('immersive-ar', {
-          ...base,
-          optionalFeatures: [...base.optionalFeatures, 'depth-sensing'],
-          depthSensing: { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] },
-        });
+        extra.optionalFeatures.push('depth-sensing');
+        extra.depthSensing = { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] };
+      }
+      if (kfRequested) extra.optionalFeatures.push('camera-access');
+      try {
+        session = await navigator.xr.requestSession('immersive-ar', extra);
       } catch (err) {
-        console.warn('depth session failed, retrying without depth:', err);
+        console.warn('session with depth/camera failed, retrying without:', err);
       }
     }
     if (!session) session = await navigator.xr.requestSession('immersive-ar', base);
@@ -233,6 +252,20 @@ async function startScan() {
   try {
     depthOn = depthRequested && session.depthUsage === 'cpu-optimized';
   } catch {}
+
+  // Camera keyframes: granted? (enabledFeatures may be missing on older Chrome: then trust view.camera.)
+  kfOn = false;
+  if (kfRequested && (!session.enabledFeatures || session.enabledFeatures.includes('camera-access'))) {
+    try {
+      kfBinding = new XRWebGLBinding(session, renderer.getContext());
+      kfGrabber = new CameraGrabber(renderer.getContext(), KF_MAX_WIDTH);
+      kfOn = true;
+    } catch (err) {
+      say(`Camera keyframes unavailable: ${err.message}`, 'warn');
+    }
+  } else if (kfRequested) {
+    say('Camera access not granted: scanning without photos.', 'warn');
+  }
 
   const viewerSpace = await session.requestReferenceSpace('viewer');
   const rays = fanRays();
@@ -258,6 +291,9 @@ async function startScan() {
     depth: depthOn
       ? { usage: session.depthUsage, format: session.depthDataFormat, rows: DEPTH_ROWS, cols: DEPTH_COLS, range: [DEPTH_MIN, DEPTH_MAX] }
       : null,
+    // keyframe lines = camera photos: {"type":"keyframe","t","p","q","intrinsics":{fx,fy,cx,cy,w,h},"img"}
+    // intrinsics in pixels, top-left origin; p/q = camera pose (view.transform) in local-floor
+    keyframes: kfOn ? { max_width: KF_MAX_WIDTH, jpeg_quality: KF_JPEG_Q } : null,
   };
   const headerLine = toLine(header);
   rec = {
@@ -280,6 +316,12 @@ async function startScan() {
     depthPoints: 0,
     depthMs: 0,
     depthPaused: false,
+    kfGate: new KeyframeGate(),
+    keyframes: 0,
+    kfPending: 0,
+    kfMs: 0,
+    kfNoCamera: 0,
+    kfStopped: false,
     fps: 0,
     lastFrameTime: null,
     recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
@@ -369,8 +411,68 @@ function onXRFrame(time, frame) {
   rec.frames++;
   rec.points += pts.length;
 
+  if (kfOn && !rec.kfStopped) maybeKeyframe(pose, t);
+
   if (rec.pendingFrames >= FLUSH_EVERY_FRAMES) flush();
   renderStatus();
+}
+
+// Grab a camera photo when the gate says we've moved/turned enough and aren't swinging.
+// Runs inside the XR frame (the camera texture is only valid there); encoding + storage are async.
+function maybeKeyframe(pose, t) {
+  const view = pose.views[0];
+  const cam = view.camera;
+  if (!cam) {
+    rec.kfNoCamera++;
+    return;
+  }
+  const tf = view.transform;
+  const p = [tf.position.x, tf.position.y, tf.position.z];
+  const q = [tf.orientation.x, tf.orientation.y, tf.orientation.z, tf.orientation.w];
+  if (rec.kfPending >= 2 || !rec.kfGate.check(t, p, q)) return; // don't pile up encodes
+
+  const t0 = performance.now();
+  let shot = null;
+  try {
+    shot = kfGrabber.grab(kfBinding, cam);
+  } catch (err) {
+    rec.kfStopped = true;
+    say(`Keyframes stopped: ${err.message}`, 'warn');
+  } finally {
+    renderer.resetState(); // we changed GL state behind three.js's back
+  }
+  if (!shot) return;
+  const ms = performance.now() - t0;
+  rec.kfMs = rec.kfMs ? rec.kfMs + 0.3 * (ms - rec.kfMs) : ms;
+  rec.kfGate.taken(t, p, q);
+
+  const name = `kf_${String(rec.keyframes).padStart(4, '0')}.jpg`;
+  rec.keyframes++;
+  const K = intrinsicsFromProjection(view.projectionMatrix, shot.w, shot.h);
+  const meta = {
+    type: 'keyframe',
+    t: r3(t),
+    p: p.map(r3),
+    q: q.map((v) => Math.round(v * 1e5) / 1e5),
+    intrinsics: Object.fromEntries(Object.entries(K).map(([k, v]) => [k, Math.round(v * 100) / 100])),
+    img: name,
+  };
+  const r = rec;
+  r.kfPending++;
+  encodeJpeg(shot.px, shot.w, shot.h, KF_JPEG_Q)
+    .then((blob) => store.putKeyframe(r.header.session_id, name, blob))
+    .then((ok) => {
+      if (!ok) {
+        r.kfStopped = true;
+        say('Phone storage full: photos stopped (the scan itself continues).', 'warn');
+        return;
+      }
+      const line = toLine(meta); // written only once the photo is safely stored
+      r.lines.push(line);
+      r.pending += line;
+    })
+    .catch((err) => say(`Photo failed: ${err.message}`, 'warn'))
+    .finally(() => r.kfPending--);
 }
 
 // ---- live hint: one instruction at a time, most urgent first ----
@@ -441,6 +543,7 @@ async function onSessionEnd() {
   ui.start.disabled = false;
 
   if (rec) {
+    for (let i = 0; i < 30 && rec.kfPending > 0; i++) await new Promise((r) => setTimeout(r, 100)); // let photos finish
     const statsLine = toLine({
       type: 'stats',
       frames: rec.frames,
@@ -449,6 +552,7 @@ async function onSessionEnd() {
       ray_hits: rec.rayHits,
       depth_frames: rec.depthFrames,
       depth_points: rec.depthPoints,
+      keyframes: rec.keyframes,
       duration: r3(rec.lastT),
     });
     rec.lines.push(statsLine);
@@ -459,7 +563,8 @@ async function onSessionEnd() {
     await store.updateSession(id, { done: true, frames: done.frames });
     lastScan = { id, text: done.lines.join(''), frames: done.frames, points: done.points };
     rec = null;
-    say(done.frames ? `Scan ${id} saved on phone (${done.frames} frames).` : 'Scan was empty.', done.frames ? '' : 'warn');
+    const photos = done.keyframes ? `, ${done.keyframes} photos` : '';
+    say(done.frames ? `Scan ${id} saved on phone (${done.frames} frames${photos}).` : 'Scan was empty.', done.frames ? '' : 'warn');
   }
   ui.download.disabled = ui.upload.disabled = !lastScan;
   renderStatus();
@@ -492,6 +597,7 @@ async function uploadText(id, text) {
       await store.updateSession(id, { uploaded: true });
       say(`Uploaded ${id}: ${info.frames} frames, ${info.points} points.`);
       refreshSaved();
+      await uploadKeyframes(id);
       return true;
     } catch (err) {
       say(`Upload failed: ${err.message}`, 'warn');
@@ -500,6 +606,47 @@ async function uploadText(id, text) {
   }
   say('Upload failed 3 times. Scan is still on the phone: try again later, or Download and copy over USB.', 'bad');
   return false;
+}
+
+// One PUT per photo, skipping ones the server already has, so a flaky upload resumes.
+async function uploadKeyframes(id) {
+  const kfs = await store.listKeyframes(id);
+  if (!kfs.length) return true;
+  let have = new Set();
+  try {
+    const res = await fetch(`${SERVER}/api/scans/${id}/kf`);
+    if (res.ok) have = new Set(await res.json());
+  } catch {}
+  const todo = kfs.filter((k) => !have.has(k.name));
+  let sent = 0;
+  for (const k of todo) {
+    say(`Uploading photos ${sent + 1}/${todo.length}…`);
+    try {
+      const res = await fetch(`${SERVER}/api/scans/${id}/kf/${k.name}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg' }, body: k.blob });
+      if (!res.ok) throw new Error(`${res.status}`);
+      sent++;
+    } catch (err) {
+      say(`Photo upload stopped at ${sent}/${todo.length} (${err.message}). Tap ⬆ again later to resume.`, 'warn');
+      return false;
+    }
+  }
+  say(`Uploaded ${kfs.length} photos for ${id}.`);
+  return true;
+}
+
+// Photos to the phone's Downloads (the USB fallback when the tunnel is down).
+async function downloadKeyframes(id) {
+  const kfs = await store.listKeyframes(id);
+  for (const k of kfs) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(k.blob);
+    a.download = `scan-${id}-${k.name}`;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    await new Promise((r) => setTimeout(r, 300)); // Chrome blocks rapid-fire downloads
+  }
+  say(`Downloaded ${kfs.length} photos.`);
 }
 
 async function refreshSaved() {
@@ -526,10 +673,16 @@ async function refreshSaved() {
         mk('✕', async () => {
           if (confirm(`Delete scan ${s.session_id} from this phone?`)) {
             await store.deleteSession(s.session_id);
+            await store.deleteKeyframes(s.session_id);
             refreshSaved();
           }
         }),
       );
+      store.countKeyframes(s.session_id).then((n) => {
+        if (!n) return;
+        name.textContent += ` · ${n} photos`;
+        row.insertBefore(mk('⬇img', () => downloadKeyframes(s.session_id)), row.lastChild);
+      });
       return row;
     }),
   );

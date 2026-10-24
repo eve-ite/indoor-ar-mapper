@@ -149,3 +149,20 @@ skew = p[4] * w/2        // expect 0
 - [Immersive Web IRC 2022-04-22 (camera during AR sessions)](https://www.w3.org/2022/04/22-immersive-web-irc)
 - [WPT camera-access tests](https://chromium.googlesource.com/external/w3c/web-platform-tests.git/+/HEAD/webxr/camera-access)
 - [Google: WebXR vs ARCore feature comparison](https://developers.google.com/ar/develop/webxr/arcore-comparison)
+
+---
+
+## Phase 3 status (built on this branch, not yet run on the S23)
+
+Everything is behind toggles that are **off by default**. Scans without photos look and behave exactly as before.
+
+| Piece | Where | Tested |
+|---|---|---|
+| Keyframe capture: Settings → "Camera photos", or `?keyframes=1`. Requests `camera-access` as optional; gated at 30 cm / 15° / 0.5 s and skipped while turning > 40°/s; 960 px JPEGs in a **separate** IndexedDB (`indoor-ar-mapper-keyframes`), so main's DB version is untouched. A `{"type":"keyframe","t","p","q","intrinsics","img"}` line is written once the photo is stored. | `web/scan/scan.js`, `web/scan/store.js`, `web/common/keyframes.js` | page loads, syntax; **AR path needs the phone** |
+| Resumable photo upload (one PUT each, skipping what the server has) and download to the phone (USB fallback) | `scan.js`, server `PUT/GET /api/scans/{id}/kf[/name]` | endpoints ✓ |
+| Viewer: camera frustums with photo thumbnails at capture poses | `web/viewer/view3d.js` | synthetic ✓ (screenshot) |
+| Viewer: floor coloured from photos (projection + occlusion against obstacle heights) | `web/viewer/floorcolor.js` | synthetic ✓: 58/58 tile colours correct, rug at the right place |
+| nerfstudio export (`transforms.json` + images zip) | `GET /api/scans/{id}/nerfstudio.zip` | ✓ det(R)=1, pitch and position match the generator |
+| Synthetic scan with ray-cast photos | `tools/make_synthetic.py --photos` | Python render ↔ JS projection agree to 0.002 px |
+
+**Still unknown until the S23 runs `/camtest/` or a scan with photos:** whether the camera image is upside down in readback (the red dot will show it), the real readback ms, and three.js + our raw GL coexisting (`renderer.resetState()` after each grab).

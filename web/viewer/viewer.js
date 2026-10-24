@@ -3,6 +3,7 @@ import { parseScan } from '../common/jsonl.js';
 import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
 import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
 import { View3D } from './view3d.js';
+import { floorColors } from './floorcolor.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -16,7 +17,9 @@ const PROFILE_KEYS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'bodyRadiu
 const ROUTE_COLOR = '#facc15';
 const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 
-let scan = null; // { name, header, frames, skipped, stats }
+let scan = null; // { name, header, frames, keyframes, skipped, serverId }
+let kfImages = null; // Map img name -> ImageData, loaded once per scan for the photo floor
+let photoFloor = null; // RGBA per grid cell, or null
 let grid = null;
 let gridImage = null;
 let trav = null;
@@ -58,7 +61,7 @@ async function loadFromServer(id) {
   try {
     const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error(`${res.status}`);
-    setScan(id, await res.text());
+    setScan(id, await res.text(), id);
     document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
   } catch (err) {
     $('err').textContent = `Could not load ${id}: ${err.message}`;
@@ -71,14 +74,17 @@ function loadFile(file) {
   reader.readAsText(file);
 }
 
-function setScan(name, text) {
+function setScan(name, text, serverId = null) {
   $('err').textContent = '';
   const parsed = parseScan(text);
   if (!parsed.frames.length) {
     $('err').textContent = `${name}: no frames found${parsed.header ? '' : ' (and no header)'}`;
     return;
   }
-  scan = { name, ...parsed };
+  scan = { name, serverId, ...parsed };
+  kfImages = null;
+  photoFloor = null;
+  setupPhotos();
   detected = detectProfile(scan.frames);
   route = { a: null, b: null, path: null, info: '' };
   const r = (params.get('route') || '').split(',').map(Number); // ?route=ax,az,bx,bz
@@ -115,6 +121,7 @@ function rebuild() {
   gridImage = grid ? renderGridImage(grid) : null;
   trav = grid ? traversability(grid) : null;
   travImage = trav ? renderTravImage(grid, trav) : null;
+  if (photoFloor) recolorFloor(); // grid changed: re-project (images are cached)
   if (view3d && grid) view3d.setMap(grid, trav);
   computeRoute();
   renderStats();
@@ -294,9 +301,99 @@ function ensure3d() {
   if (!view3d) {
     view3d = new View3D($('view3d'), cssColor);
     view3d.onPick = (x, z) => addRoutePoint([x, z]);
+    view3d.setFloorColors(photoFloor);
     if (grid) view3d.setMap(grid, trav);
+    syncPhotos3d();
   }
   return view3d;
+}
+
+// ---- camera keyframes (textures branch) ----
+const kfUrl = (kf) => (scan?.serverId ? `${SERVER}/api/scans/${encodeURIComponent(scan.serverId)}/kf/${kf.img}` : null);
+
+function setupPhotos() {
+  const n = scan.keyframes?.length || 0;
+  $('photos').hidden = !n;
+  if (!n) {
+    view3d?.setKeyframes(null);
+    view3d?.setFloorColors(null);
+    return;
+  }
+  $('photoFloor').checked = false;
+  $('photoNote').textContent = scan.serverId
+    ? `${n} photos in this scan`
+    : `${n} photos listed, but images only load for scans opened from the server list`;
+  $('photoFloor').disabled = !scan.serverId;
+  const zip = $('nerfLink');
+  zip.hidden = !scan.serverId;
+  if (scan.serverId) zip.href = `${SERVER}/api/scans/${encodeURIComponent(scan.serverId)}/nerfstudio.zip`;
+  syncPhotos3d();
+}
+
+function syncPhotos3d() {
+  if (!view3d || !scan) return;
+  view3d.setKeyframes(scan.keyframes, kfUrl);
+  view3d.showKeyframes($('showPhotos').checked);
+}
+
+async function loadKfImages() {
+  if (kfImages) return kfImages;
+  const out = new Map();
+  let done = 0;
+  const queue = [...scan.keyframes];
+  const worker = async () => {
+    for (let kf = queue.shift(); kf; kf = queue.shift()) {
+      try {
+        const res = await fetch(kfUrl(kf));
+        if (!res.ok) throw new Error(res.status);
+        const bmp = await createImageBitmap(await res.blob());
+        const c = new OffscreenCanvas(bmp.width, bmp.height);
+        const cx = c.getContext('2d');
+        cx.drawImage(bmp, 0, 0);
+        out.set(kf.img, cx.getImageData(0, 0, bmp.width, bmp.height));
+      } catch (err) {
+        console.warn('photo', kf.img, err);
+      }
+      $('photoNote').textContent = `loading photos ${++done}/${scan.keyframes.length}…`;
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  kfImages = out;
+  return out;
+}
+
+// Floor height at time t: the tracked floor of the nearest recorded frame.
+function floorAt(t) {
+  const f = scan.frames;
+  let lo = 0, hi = f.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (f[mid].t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return grid.floors[lo];
+}
+
+function recolorFloor() {
+  const t0 = performance.now();
+  const kfs = scan.keyframes.map((kf) => ({ ...kf, image: kfImages.get(kf.img) }));
+  photoFloor = floorColors(grid, trav, kfs, floorAt);
+  let n = 0;
+  for (let i = 3; i < photoFloor.length; i += 4) if (photoFloor[i]) n++;
+  $('photoNote').textContent = `floor coloured from ${kfImages.size} photos: ${(n * grid.cell * grid.cell).toFixed(1)} m² (${(performance.now() - t0).toFixed(0)} ms)`;
+  view3d?.setFloorColors(photoFloor);
+}
+
+async function togglePhotoFloor() {
+  if ($('photoFloor').checked) {
+    await loadKfImages();
+    recolorFloor();
+  } else {
+    photoFloor = null;
+    view3d?.setFloorColors(null);
+    $('photoNote').textContent = `${scan.keyframes.length} photos in this scan`;
+  }
+  if (view3d && grid) view3d.setMap(grid, trav);
 }
 
 // Route in world coords: string-pulled cell path, exact clicked endpoints (the tube smooths it).
@@ -502,6 +599,8 @@ $('zoomIn').onclick = () => (mode === 'map' ? ensure3d().zoom(1.4) : zoomCenter(
 $('zoomOut').onclick = () => (mode === 'map' ? ensure3d().zoom(1 / 1.4) : zoomCenter(1 / 1.4));
 $('zoomFit').onclick = fit;
 $('topDown').onclick = () => ensure3d().topDown();
+$('showPhotos').onchange = () => view3d?.showKeyframes($('showPhotos').checked);
+$('photoFloor').onchange = () => togglePhotoFloor().catch((e) => ($('photoNote').textContent = e.message));
 
 // ---- Map / Debug mode (remembered) ----
 function setMode(m) {
