@@ -1,0 +1,118 @@
+# Car (M3): keyboard teleop over wifi
+
+```
+laptop browser /teleop ──ws──► server /drive ──relay──► server /car ◄──wss── ESP32-S3 car
+       ▲  telemetry ◄──────────────────────────────────────────────────────────┘
+```
+
+- `firmware/car/`: car firmware (ESP32-S3 N16R8). Pins and tunables in `config.h`.
+- `firmware/bringup_*`: one-job test sketches for wiring things up (see `WIRING.md`).
+- `teleop/`: the `/teleop` page (WASD/arrows, touch joystick, STOP, live telemetry).
+- `mock_car.py`: a fake car that speaks the same protocol, for testing with no hardware.
+- `tests/`: end-to-end tests (server + mock + scripted/headless-browser driver).
+- Server side: `server/car_relay.py` (the `/car` and `/drive` WebSockets).
+
+**Safety lives on the car:**
+- If no command arrives for 300 ms, it stops and switches the coils off.
+- If the WebSocket drops, it stops immediately.
+- Forward is refused while the ultrasonic reads under 15 cm (and until it reads over 18 cm again).
+- Reverse and turning always work.
+
+The teleop page also sends stops on key release, window blur, tab hidden and page close.
+
+## Networking (venue wifi, no hotspots)
+
+The car joins the venue wifi as an ordinary client and **dials out** to the laptop's cloudflared
+tunnel: `wss://<random>.trycloudflare.com/car`. This works through client isolation and doesn't
+need a hotspot. On a home network it can also use plain `ws://<laptop-ip>:8000/car`.
+
+Quick-tunnel URLs change every time cloudflared restarts. Update the car **without reflashing**
+over the serial monitor (115200 baud, newline):
+
+```
+host abc-def.trycloudflare.com      # then it reconnects
+show                                # wifi + server + link status
+port 443 | tls 1                    # tunnel (default)
+port 8000 | tls 0                   # LAN
+wifi <ssid> <password>
+reset                               # back to secrets.h defaults
+```
+
+Settings are saved to flash. WPA2-Enterprise (eduroam-style) networks aren't supported yet. If
+the venue only has those, ask the organizers for a device/IoT network.
+
+## Flash the firmware (Arduino IDE 2)
+
+1. **Board support:** File → Preferences → *Additional boards manager URLs*: add
+   `https://espressif.github.io/arduino-esp32/package_esp32_index.json`. Then in Boards Manager,
+   install **esp32 by Espressif Systems**.
+2. **Libraries (Library Manager):**
+   - **AccelStepper** (Mike McCauley)
+   - **WebSockets** (Markus Sattler / Links2004)
+   - **ArduinoJson** (Benoit Blanchon, v7)
+3. Open `car/firmware/car/car.ino`. Copy `secrets.example.h` to `secrets.h` in the same folder
+   and fill in the wifi details and the tunnel host. `secrets.h` is gitignored.
+4. **Tools menu:**
+   - Board **ESP32S3 Dev Module**
+   - Flash Size **16MB (128Mb)**
+   - PSRAM **OPI PSRAM**
+   - plug in the DevKitC's **"COM"/"UART" USB port** and pick that port
+5. Upload, then open the Serial Monitor at **115200**. You should see the MPU6050 status, the
+   config, then `[ws] connected`.
+
+Command line (what the repo was checked with):
+
+```sh
+arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi car/firmware/car
+```
+
+## Run it
+
+```sh
+cd server && uv run uvicorn main:app --port 8000          # terminal 1
+cloudflared tunnel --url http://localhost:8000 --protocol http2 --no-autoupdate   # terminal 2
+```
+
+Then open `http://localhost:8000/teleop/` on the laptop (or `<tunnel>/teleop/` on a phone).
+
+**Controls:**
+- Drive: W/S or ↑/↓ forward/back, A/D or ←/→ turn left/right.
+- Stop: space or the STOP button.
+- The slider caps the speed.
+
+**Status pills:** they show whether the server and the car are connected, and "car silent" means
+telemetry has stopped arriving.
+
+## Without hardware
+
+```sh
+python car/mock_car.py --url ws://localhost:8000/car [--wall 0.5]
+```
+
+It simulates the car in a room, with a wall `--wall` meters ahead, and prints stop/move/blocked
+events.
+
+Tests (each starts its own server on 8790/8791 plus the mock):
+
+```sh
+server/.venv/Scripts/python car/tests/test_car.py     # relay, deadman, forward block, server kill
+node car/tests/teleop_e2e.mjs                         # real page in headless Chrome, real keys
+```
+
+## Protocol
+
+| Direction | Message |
+|---|---|
+| browser → server → car | `{"type":"drive","v":-1..1,"w":-1..1,"seq":n}`: v forward +, w turn left + |
+| car → server → browsers | `{"type":"telemetry","dist_cm","ir_blocked","left_steps","right_steps","yaw_rate","rssi","uptime_ms","blocked","seq"}` |
+| server → browsers | `{"type":"car_status","connected":bool}` |
+
+- **Units:** `dist_cm` is in cm (null when there's no valid echo) and `yaw_rate` is in rad/s
+  (null without the MPU6050).
+- **Steps:** step counts are half-steps, positive = forward. At 4096 per wheel turn, they double
+  as odometry.
+- **Drive commands are latest-wins:** the relay never queues them, so a laggy link can't replay
+  old commands.
+
+**Speed:** the 28BYJ-48 is slow. The default `MAX_STEP_RATE 900` half-steps/s with 65 mm wheels
+is about 4.5 cm/s. Above ~1000 it skips steps at 5 V.
