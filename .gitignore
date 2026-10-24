@@ -4,3 +4,5 @@ scans/*
 __pycache__/
 *.pyc
 server/.venv/
+.claude/
+car/firmware/**/secrets.h

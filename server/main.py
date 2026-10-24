@@ -87,7 +87,10 @@ def get_scan(scan_id: str):
     return FileResponse(path, media_type="application/x-ndjson")
 
 
-# M3: WebSocket relay for car drive commands goes here (ESP32 dials out to the tunnel via wss://).
+# M3: car relay (/car, /drive WebSockets) and the /teleop page; see car_relay.py.
+from car_relay import install as install_car  # noqa: E402
+
+install_car(app, ROOT)
 
 
 @app.get("/")
