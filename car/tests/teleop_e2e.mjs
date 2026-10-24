@@ -80,17 +80,27 @@ async function main() {
   const moving = mock.events.filter((e) => e.event === 'move').length > 0;
   check('mock reported moving', moving);
 
-  const tUp = Date.now() / 1000; // before sending: the stop can land before CDP acks the key
-  await key('keyUp');
-  const stopUp = await waitFor(() => mock.events.find((e) => e.event === 'stop' && e.t >= tUp), 2000);
-  check('releasing W stops the car', !!stopUp && stopUp.t - tUp < 0.35, stopUp ? `${Math.round((stopUp.t - tUp) * 1000)} ms (${stopUp.reason})` : 'no stop');
+  // The mock (Python) and this script (Node) read slightly different clocks, so find "the first
+  // stop after this drive started" by event order, and only use timestamps for the latency.
+  const stopAfter = (startIdx) => mock.events.slice(startIdx).find((e) => e.event === 'stop');
+  const latency = (stop, t0) => `${Math.max(0, Math.round((stop.t - t0) * 1000))} ms (${stop.reason})`;
+  const holdIdx = mock.events.findIndex((e) => e.event === 'move');
+  // No stop may happen while W is still held (a throttled tab would let the deadman fire).
+  check('no stop while W is held', !stopAfter(holdIdx));
 
+  const tUp = Date.now() / 1000;
+  await key('keyUp');
+  const stopUp = await waitFor(() => stopAfter(holdIdx), 2000);
+  check('releasing W stops the car', !!stopUp && stopUp.t - tUp < 0.35, stopUp ? latency(stopUp, tUp) : 'no stop');
+
+  const idx2 = mock.events.length;
   await key('keyDown');
-  await sleep(600);
+  await waitFor(() => mock.events.slice(idx2).some((e) => e.event === 'move'), 2000);
+  await sleep(500);
   const tClose = Date.now() / 1000;
   await fetch(`http://127.0.0.1:${CDP}/json/close/${page.id}`);
-  const stopClose = await waitFor(() => mock.events.find((e) => e.event === 'stop' && e.t >= tClose), 2000);
-  check('closing the tab stops the car', !!stopClose && stopClose.t - tClose < 0.35, stopClose ? `${Math.round((stopClose.t - tClose) * 1000)} ms (${stopClose.reason})` : 'no stop');
+  const stopClose = await waitFor(() => stopAfter(idx2), 2000);
+  check('closing the tab stops the car', !!stopClose && stopClose.t - tClose < 0.35, stopClose ? latency(stopClose, tClose) : 'no stop');
 }
 
 main()
