@@ -1,6 +1,9 @@
 // Phase 2 camera test: can this phone give us camera photos + pose + intrinsics during immersive-ar,
 // flag-free? Raw WebGL2 (no three.js) so nothing hides what the browser does.
-import { r3 } from '../common/jsonl.js';
+// Self-contained (no imports) so the service worker can run it offline; results persist in
+// IndexedDB and leave the phone via the share sheet (e.g. to Google Drive) or the laptop server.
+
+const r3 = (v) => Math.round(v * 1000) / 1000;
 
 const MAX_W = 1280; // read back at most this wide (smaller = cheaper readPixels + JPEG)
 const JPEG_Q = 0.8;
@@ -33,6 +36,7 @@ const ICON = { pass: '✓', fail: '✗', warn: '!', pending: '·' };
 function setCheck(key, state, detail = '') {
   results[key] = { state, detail };
   renderChecks();
+  saveReportSoon();
 }
 
 function renderChecks() {
@@ -303,7 +307,8 @@ async function encode(px, w, h, meta) {
   meta.bytes = blob.size;
   setCheck('jpeg', 'pass', `${(blob.size / 1024).toFixed(0)} KB, ${meta.encode_ms.toFixed(0)} ms`);
   keyframes.push({ meta, blob, url: URL.createObjectURL(blob) });
-  say(`Captured ${meta.name}`, 'ok');
+  db.put('keyframes', { name: meta.name, meta, blob });
+  say(`Captured ${meta.name} (saved on phone)`, 'ok');
   renderKeyframes();
 }
 
@@ -355,8 +360,123 @@ function onEnd() {
   hitSource = null;
   document.body.classList.remove('in-ar');
   $('start').disabled = false;
-  $('upload').disabled = false;
+  $('upload').disabled = $('share').disabled = $('clear').disabled = false;
+  saveReportSoon();
   renderKeyframes();
+}
+
+// ---- on-phone storage (IndexedDB): keyframes + latest report survive closing the tab ----
+const db = {
+  open() {
+    return (this.p ??= new Promise((res, rej) => {
+      const r = indexedDB.open('camtest', 1);
+      r.onupgradeneeded = () => {
+        r.result.createObjectStore('keyframes', { keyPath: 'name' });
+        r.result.createObjectStore('report');
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }));
+  },
+  async run(store, mode, fn) {
+    try {
+      const d = await this.open();
+      return await new Promise((res, rej) => {
+        const t = d.transaction(store, mode);
+        const req = fn(t.objectStore(store));
+        t.oncomplete = () => res(req?.result);
+        t.onerror = () => rej(t.error);
+      });
+    } catch (err) {
+      console.warn('camtest db:', err);
+      say(`Couldn't save on phone: ${err.message}`, 'bad');
+    }
+  },
+  put: (store, v, k) => db.run(store, 'readwrite', (os) => os.put(v, k)),
+  all: (store) => db.run(store, 'readonly', (os) => os.getAll()),
+  get: (store, k) => db.run(store, 'readonly', (os) => os.get(k)),
+  clear: (store) => db.run(store, 'readwrite', (os) => os.clear()),
+};
+
+const buildReport = () => ({ env, cameraSize, fps: r3(fps), results, keyframes: keyframes.map((k) => k.meta) });
+let saveTimer = null;
+function saveReportSoon() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => db.put('report', buildReport(), 'latest'), 300);
+}
+
+async function restore() {
+  const saved = (await db.all('keyframes')) || [];
+  saved.sort((a, b) => (a.name < b.name ? -1 : 1));
+  for (const k of saved) keyframes.push({ meta: k.meta, blob: k.blob, url: URL.createObjectURL(k.blob) });
+  const rep = await db.get('report', 'latest');
+  if (rep?.results) {
+    // Show the last run's session results until a new AR session overwrites them.
+    for (const [k, v] of Object.entries(rep.results)) if (!results[k] || results[k].state === 'pending') results[k] = v;
+    cameraSize = rep.cameraSize ?? cameraSize;
+  }
+  renderChecks();
+  renderKeyframes();
+  const has = saved.length || rep;
+  $('share').disabled = $('upload').disabled = $('clear').disabled = !has;
+  if (has) say(`${saved.length} keyframe(s) + results saved on this phone`);
+}
+
+// ---- share sheet (Drive, Gmail, Nearby Share...) with a download fallback ----
+async function shareResults() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const json = JSON.stringify(buildReport(), null, 1);
+  let report = new File([json], `camtest_${stamp}_report.json`, { type: 'application/json' });
+  const imgs = keyframes.map((k) => new File([k.blob], `camtest_${stamp}_${k.meta.name}`, { type: 'image/jpeg' }));
+  // Some share targets refuse .json; fall back to .txt with the same content.
+  if (navigator.canShare && !navigator.canShare({ files: [report] })) {
+    report = new File([json], `camtest_${stamp}_report.txt`, { type: 'text/plain' });
+  }
+  const files = [report, ...imgs];
+  if (navigator.canShare?.({ files })) {
+    try {
+      await navigator.share({ files, title: 'WebXR camera test results' });
+      say('Shared ✓', 'ok');
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      say(`Share failed (${err.message}); downloading instead`, 'bad');
+    }
+  }
+  for (const f of files) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(f);
+    a.download = f.name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    await new Promise((r) => setTimeout(r, 400)); // Chrome blocks rapid-fire downloads
+  }
+  say(`Downloaded ${files.length} file(s) to the phone`, 'ok');
+}
+
+async function clearSaved() {
+  if (!confirm('Delete saved keyframes and results from this phone?')) return;
+  await db.clear('keyframes');
+  await db.clear('report');
+  keyframes.length = 0;
+  for (const k of Object.keys(results)) delete results[k];
+  location.reload();
+}
+
+// ---- offline: service worker caches this page on the first visit ----
+async function setupOffline() {
+  const el = $('offline');
+  if (!('serviceWorker' in navigator)) return (el.textContent = 'Offline mode not supported in this browser');
+  try {
+    await navigator.serviceWorker.register('./sw.js');
+    await navigator.serviceWorker.ready;
+    el.textContent = '✓ Saved for offline use: this page now opens even with the laptop off';
+    el.className = 'ok';
+  } catch (err) {
+    el.textContent = `Offline caching failed: ${err.message}`;
+    el.className = 'bad';
+  }
 }
 
 // ---- send results (+ keyframes) to the laptop server ----
@@ -369,7 +489,7 @@ async function upload() {
   };
   try {
     say('Sending…');
-    const report = { env, cameraSize, fps: r3(fps), results, keyframes: keyframes.map((k) => k.meta) };
+    const report = buildReport();
     await put('report.json', JSON.stringify(report, null, 1), 'application/json');
     for (const k of keyframes) await put(k.meta.name, k.blob, 'image/jpeg');
     say(`Sent ${keyframes.length} keyframes as ${id} ✓`, 'ok');
@@ -386,6 +506,8 @@ $('capture').onclick = () => {
 $('gum').onclick = tryGetUserMedia;
 $('stop').onclick = () => session?.end();
 $('upload').onclick = upload;
+$('share').onclick = shareResults;
+$('clear').onclick = clearSaved;
 
 async function init() {
   renderChecks();
@@ -398,3 +520,5 @@ async function init() {
   $('start').disabled = !ok;
 }
 init();
+restore();
+setupOffline();

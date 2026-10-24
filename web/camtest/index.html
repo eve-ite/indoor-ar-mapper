@@ -69,9 +69,9 @@
       box-shadow: 0 0 0 2px #fff;
     }
     .kf pre { margin: 0; font-size: 11px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
-    #msg { min-height: 1.2em; color: var(--muted); }
-    #msg.bad { color: var(--bad); }
-    #msg.ok { color: var(--accent); }
+    #msg, #offline { min-height: 1.2em; color: var(--muted); margin: 0; font-size: 14px; }
+    #msg.bad, #offline.bad { color: var(--bad); }
+    #msg.ok, #offline.ok { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -89,9 +89,12 @@
       <button id="capture" class="primary show-in-ar">Capture keyframe</button>
       <button id="gum" class="show-in-ar">Try getUserMedia</button>
       <button id="stop" class="stop wide show-in-ar">Exit AR</button>
-      <button id="upload" class="wide hide-in-ar" disabled>Send results to laptop</button>
+      <button id="share" class="primary wide hide-in-ar" disabled>Share results (Drive, Gmail…)</button>
+      <button id="upload" class="hide-in-ar" disabled>Send to laptop</button>
+      <button id="clear" class="hide-in-ar" disabled>Clear saved</button>
     </div>
     <p id="msg"></p>
+    <p id="offline" class="hide-in-ar">Setting up offline mode…</p>
     <div id="kfs" class="hide-in-ar"></div>
   </div>
   <div id="reticle" class="show-in-ar"></div>
