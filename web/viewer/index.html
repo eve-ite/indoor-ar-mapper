@@ -13,17 +13,15 @@
       --line: #dde1e6;
       --accent: #12917b;
       --bad: #c94444;
-      /* Map mode, after Google Maps' default (light) style. Keep these #rrggbb: mapstyle.js parses them. */
-      --map-unknown: #e8e6e1;
-      --map-floor: #f8f7f4;
-      --map-road: #ffffff;
-      --map-road-edge: #d6d2c8;
-      --map-obst: #d3d6db;
-      --map-obst-edge: #b4b9c1;
-      --map-route: #1a73e8;
-      --map-route-edge: #ffffff;
-      --map-pin: #ea4335;
-      --map-start: #188038;
+      /* 3D map. Keep these #rrggbb: view3d.js parses them. obst = low blocks, obst-edge = tall ones. */
+      --map-unknown: #dfe3e8;
+      --map-floor: #f4f5f7;
+      --map-road: #cfe8e2;
+      --map-obst: #9aa6b4;
+      --map-obst-edge: #5d6b7c;
+      --map-route: #12917b;
+      --map-pin: #e8590c;
+      --map-start: #12917b;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -34,16 +32,14 @@
         --line: #2a333b;
         --accent: #2bc4a8;
         --bad: #ef6b6b;
-        --map-unknown: #1b1f24;
-        --map-floor: #2b313a;
-        --map-road: #3d4552;
-        --map-road-edge: #252a31;
-        --map-obst: #5b6573;
-        --map-obst-edge: #7a8592;
-        --map-route: #8ab4f8;
-        --map-route-edge: #1b1f24;
-        --map-pin: #f28b82;
-        --map-start: #81c995;
+        --map-unknown: #101418;
+        --map-floor: #262d35;
+        --map-road: #23463f;
+        --map-obst: #6b7889;
+        --map-obst-edge: #a9b6c6;
+        --map-route: #2bc4a8;
+        --map-pin: #ff8a4c;
+        --map-start: #2bc4a8;
       }
     }
     * { box-sizing: border-box; }
@@ -121,6 +117,9 @@
     #err { color: var(--bad); }
     main { position: relative; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+    #view3d { position: absolute; inset: 0; }
+    body.mode-map #map { display: none; }
+    body.mode-debug #view3d, body.mode-debug #topDown { display: none; }
     canvas:active { cursor: grabbing; }
     #hint { position: absolute; left: 50%; transform: translateX(-50%); bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; white-space: nowrap; }
     #zoom {
@@ -188,9 +187,10 @@
     <section class="map-only">
       <h2>Legend</h2>
       <div class="legend">
-        <span><i style="background:var(--map-road);outline:1px solid var(--map-road-edge)"></i>walked path</span>
+        <span><i style="background:var(--map-road)"></i>walked path</span>
         <span><i style="background:var(--map-floor);outline:1px solid var(--line)"></i>open floor</span>
-        <span><i style="background:var(--map-obst);outline:1px solid var(--map-obst-edge)"></i>obstacle</span>
+        <span><i style="background:linear-gradient(var(--map-obst-edge),var(--map-obst))"></i>obstacle (height = scanned)</span>
+        <span><i style="background:var(--map-pin);border-radius:50%"></i>destination</span>
         <span><i class="line" style="background:var(--map-route)"></i>route</span>
       </div>
     </section>
@@ -243,13 +243,16 @@
   </aside>
   <main>
     <canvas id="map"></canvas>
+    <div id="view3d"></div>
     <div id="zoom">
       <button id="zoomIn" title="Zoom in">+</button>
       <button id="zoomOut" title="Zoom out">−</button>
       <button id="zoomFit" title="Fit map">⤢</button>
+      <button id="topDown" title="Top-down view">⊙</button>
     </div>
-    <div id="hint">drag to pan · scroll or pinch to zoom · click twice for a route · up = start-marker forward</div>
+    <div id="hint">drag to rotate (2D: pan) · right-drag or two fingers to pan · scroll or pinch to zoom · click twice for a route</div>
   </main>
+  <script type="importmap">{ "imports": { "three": "../vendor/three.module.min.js" } }</script>
   <script type="module" src="./viewer.js"></script>
 </body>
 </html>

@@ -2,7 +2,7 @@
 import { parseScan } from '../common/jsonl.js';
 import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
 import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
-import { buildMapLayers, chaikin, drawCompass, drawOrigin, drawPin } from './mapstyle.js';
+import { View3D } from './view3d.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -21,7 +21,7 @@ let grid = null;
 let gridImage = null;
 let trav = null;
 let travImage = null;
-let mapLayers = null; // Map-mode canvases from buildMapLayers
+let view3d = null; // 3D Map view, created the first time Map mode is shown
 let mode = 'map'; // 'map' | 'debug'
 let detected = null; // { profile, phoneHeight } from detectProfile
 let route = { a: null, b: null, path: null, info: '' }; // a/b are world [x, z]
@@ -115,7 +115,7 @@ function rebuild() {
   gridImage = grid ? renderGridImage(grid) : null;
   trav = grid ? traversability(grid) : null;
   travImage = trav ? renderTravImage(grid, trav) : null;
-  mapLayers = trav ? buildMapLayers(grid, trav, cssColor) : null;
+  if (view3d && grid) view3d.setMap(grid, trav);
   computeRoute();
   renderStats();
   draw();
@@ -194,7 +194,7 @@ function computeRoute() {
   if (!grid || !route.a || !route.b) return;
   const a = toCellIndex(route.a), b = toCellIndex(route.b);
   if (a < 0 || b < 0 || !isFinite(trav.cost[a]) || !isFinite(trav.cost[b])) {
-    route.info = 'endpoint is blocked/unknown: pick a teal cell';
+    route.info = 'that spot is blocked or unscanned: pick open floor';
     return;
   }
   const path = astar(trav.cost, grid.w, grid.h, a, b);
@@ -266,6 +266,7 @@ function resize() {
 
 function fit() {
   if (!grid) return;
+  if (mode === 'map') return ensure3d().fit();
   const r = canvas.getBoundingClientRect();
   const wm = grid.w * grid.cell;
   const hm = grid.h * grid.cell;
@@ -280,81 +281,44 @@ const sx = (x) => view.ox + x * view.s;
 const sy = (z) => view.oy + z * view.s;
 
 function draw() {
+  $('routeInfo').textContent = route.info || (route.a ? 'click a destination' : 'click the map twice to test a route');
+  if (mode === 'map') return sync3dRoute();
   const r = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
-  if (mode === 'map') {
-    ctx.fillStyle = cssColor('--map-unknown');
-    ctx.fillRect(0, 0, r.width, r.height);
-  }
-  if (scan) (mode === 'map' ? drawMap : drawDebug)(r);
+  if (scan) drawDebug(r);
   drawScaleBar(r);
-  $('routeInfo').textContent = route.info || (route.a ? 'click a destination' : 'click the map twice to test a route');
 }
 
-function drawMap(r) {
-  if (mapLayers) {
-    const x = sx(grid.minX), y = sy(grid.minZ), w = grid.w * grid.cell * view.s, h = grid.h * grid.cell * view.s;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(mapLayers.floor, x, y, w, h);
-    ctx.drawImage(mapLayers.roads, x, y, w, h);
-    ctx.save();
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.22)';
-    ctx.shadowBlur = Math.min(10, 2 + view.s * 0.04);
-    ctx.shadowOffsetY = Math.min(4, 1 + view.s * 0.015);
-    ctx.drawImage(mapLayers.obstacles, x, y, w, h);
-    ctx.restore();
+// ---- 3D map ----
+function ensure3d() {
+  if (!view3d) {
+    view3d = new View3D($('view3d'), cssColor);
+    view3d.onPick = (x, z) => addRoutePoint([x, z]);
+    if (grid) view3d.setMap(grid, trav);
   }
-  drawMapRoute();
-  drawStartFlag();
-  drawCompass(ctx, r.width - 34, 34, cssColor('--panel'), cssColor('--fg'), cssColor('--map-pin'));
+  return view3d;
 }
 
-function routeScreenPoints() {
-  const cellCenter = (i) => [grid.minX + ((i % grid.w) + 0.5) * grid.cell, grid.minZ + (((i / grid.w) | 0) + 0.5) * grid.cell];
+// Route in world coords: string-pulled cell path, exact clicked endpoints (the tube smooths it).
+function routeWorldPoints() {
+  if (!route.path) return null;
   const cells = simplifyPath(route.path, trav.cost, grid.w);
-  const pts = cells.map((i) => {
-    const [x, z] = cellCenter(i);
-    return [sx(x), sy(z)];
-  });
-  // Start/end exactly where the user clicked.
-  pts[0] = [sx(route.a[0]), sy(route.a[1])];
-  pts[pts.length - 1] = [sx(route.b[0]), sy(route.b[1])];
-  return chaikin(pts);
+  const pts = cells.map((i) => [grid.minX + ((i % grid.w) + 0.5) * grid.cell, grid.minZ + (((i / grid.w) | 0) + 0.5) * grid.cell]);
+  pts[0] = route.a;
+  pts[pts.length - 1] = route.b;
+  return pts;
 }
 
-function drawMapRoute() {
-  if (route.path) {
-    const pts = routeScreenPoints();
-    ctx.lineJoin = ctx.lineCap = 'round';
-    for (const [color, width] of [[cssColor('--map-route-edge'), 10], [cssColor('--map-route'), 6]]) {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.beginPath();
-      pts.forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
-      ctx.stroke();
-    }
-  }
-  if (route.a) drawOrigin(ctx, sx(route.a[0]), sy(route.a[1]), '#ffffff', cssColor('--map-route'));
-  if (route.b) drawPin(ctx, sx(route.b[0]), sy(route.b[1]), cssColor('--map-pin'), '#ffffff');
+function sync3dRoute() {
+  if (view3d) view3d.setRoute(routeWorldPoints(), route.a, route.b);
 }
 
-// The shared start marker (taped L on the floor) = origin of the map.
-function drawStartFlag() {
-  const x = sx(0), y = sy(0);
-  ctx.fillStyle = cssColor('--panel');
-  ctx.strokeStyle = cssColor('--map-start');
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.arc(x, y, 9, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-  ctx.fillStyle = cssColor('--map-start');
-  ctx.font = 'bold 10px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText('S', x, y + 0.5);
-  ctx.textAlign = 'start';
-  ctx.textBaseline = 'alphabetic';
+function addRoutePoint(pt) {
+  if (!grid) return;
+  if (!route.a || route.b) route = { a: pt, b: null, path: null, info: '' };
+  else route.b = pt;
+  computeRoute();
+  draw();
 }
 
 function drawDebug(r) {
@@ -522,11 +486,7 @@ canvas.addEventListener('pointerup', (e) => {
   drag = null;
   if (!click || !grid) return;
   const r = canvas.getBoundingClientRect();
-  const pt = [(e.clientX - r.left - view.ox) / view.s, (e.clientY - r.top - view.oy) / view.s];
-  if (!route.a || route.b) route = { a: pt, b: null, path: null, info: '' };
-  else route.b = pt;
-  computeRoute();
-  draw();
+  addRoutePoint([(e.clientX - r.left - view.ox) / view.s, (e.clientY - r.top - view.oy) / view.s]);
 });
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
@@ -538,15 +498,24 @@ const zoomCenter = (k) => {
   const r = canvas.getBoundingClientRect();
   zoomAt(r.width / 2, r.height / 2, k);
 };
-$('zoomIn').onclick = () => zoomCenter(1.4);
-$('zoomOut').onclick = () => zoomCenter(1 / 1.4);
+$('zoomIn').onclick = () => (mode === 'map' ? ensure3d().zoom(1.4) : zoomCenter(1.4));
+$('zoomOut').onclick = () => (mode === 'map' ? ensure3d().zoom(1 / 1.4) : zoomCenter(1 / 1.4));
 $('zoomFit').onclick = fit;
+$('topDown').onclick = () => ensure3d().topDown();
 
 // ---- Map / Debug mode (remembered) ----
 function setMode(m) {
   mode = m === 'debug' ? 'debug' : 'map';
   document.body.classList.toggle('mode-map', mode === 'map');
   document.body.classList.toggle('mode-debug', mode === 'debug');
+  if (mode === 'map') {
+    const first = !view3d;
+    ensure3d();
+    if (first && grid) view3d.fit();
+  } else {
+    resize(); // the 2D canvas had no size while hidden
+    if (grid) fit();
+  }
   for (const b of document.querySelectorAll('#modeSwitch button')) b.classList.toggle('active', b.dataset.mode === mode);
   try {
     localStorage.setItem('iam-viewer-mode', mode);
@@ -590,7 +559,10 @@ window.addEventListener('resize', resize);
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (grid) gridImage = renderGridImage(grid);
   if (trav) travImage = renderTravImage(grid, trav);
-  if (trav) mapLayers = buildMapLayers(grid, trav, cssColor);
+  if (view3d) {
+    view3d.applyTheme();
+    if (grid) view3d.setMap(grid, trav);
+  }
   draw();
 });
 

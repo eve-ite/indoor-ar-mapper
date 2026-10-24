@@ -89,6 +89,7 @@ export function buildGrid(frames, opts = {}) {
   // obs counts obstacle hits per cell on their own, so floor seen *under* a table can't vote the
   // table away (trav.js decides from it).
   const obs = new Uint16Array(w * h);
+  const obsTop = new Float32Array(w * h); // highest obstacle hit per cell (m above floor), for 3D blocks
   const counts = { floor: 0, wall: 0, ignored: 0 };
   frames.forEach((f, i) => {
     const floor = floors[i];
@@ -109,7 +110,11 @@ export function buildGrid(frames, opts = {}) {
         } else if (cls === 'wall') {
           traceFree(px, pz, phoneH, cx, cz, hitH);
           bump(cx, cz, o.lOcc);
-          if (inside(cx, cz)) obs[cz * w + cx] = Math.min(65535, obs[cz * w + cx] + 1);
+          if (inside(cx, cz)) {
+            const c = cz * w + cx;
+            obs[c] = Math.min(65535, obs[c] + 1);
+            obsTop[c] = Math.max(obsTop[c], Math.min(hitH, o.wallMax));
+          }
           counts.wall++;
         } else {
           counts.ignored++; // ceiling / between floor and wall band
@@ -138,7 +143,7 @@ export function buildGrid(frames, opts = {}) {
   }
   if (frames.length === 1) stamp(frames[0].p[0], frames[0].p[2]);
 
-  return { w, h, minX, minZ, cell: o.cell, L, obs, walked, counts, floors, opts: o };
+  return { w, h, minX, minZ, cell: o.cell, L, obs, obsTop, walked, counts, floors, opts: o };
 }
 
 export function floorPerFrame(frames) {
