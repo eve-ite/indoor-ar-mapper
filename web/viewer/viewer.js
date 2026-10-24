@@ -1,6 +1,7 @@
 // M2 map viewer: loads a scan JSONL (server list or local file) and draws grid + points + trajectory.
 import { parseScan } from '../common/jsonl.js';
-import { DEFAULTS, buildGrid, classifyHeight } from './grid.js';
+import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile } from '../common/grid.js';
+import { TRAV, astar, traversability } from '../common/trav.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -9,12 +10,18 @@ const $ = (id) => document.getElementById(id);
 const canvas = $('map');
 const ctx = canvas.getContext('2d');
 
-const SLIDERS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'maxRange'];
+const SLIDERS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'bodyRadius', 'maxRange'];
+const PROFILE_KEYS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'bodyRadius'];
+const ROUTE_COLOR = '#facc15';
 const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 
 let scan = null; // { name, header, frames, skipped, stats }
 let grid = null;
 let gridImage = null;
+let trav = null;
+let travImage = null;
+let detected = null; // { profile, phoneHeight } from detectProfile
+let route = { a: null, b: null, path: null, info: '' }; // a/b are world [x, z]
 let view = { s: 80, ox: 0, oy: 0 }; // px per meter, screen offset (CSS px)
 
 // ---- loading ----
@@ -69,6 +76,11 @@ function setScan(name, text) {
     return;
   }
   scan = { name, ...parsed };
+  detected = detectProfile(scan.frames);
+  route = { a: null, b: null, path: null, info: '' };
+  const r = (params.get('route') || '').split(',').map(Number); // ?route=ax,az,bx,bz
+  if (r.length === 4 && r.every(isFinite)) route = { a: [r[0], r[1]], b: [r[2], r[3]], path: null, info: '' };
+  applyProfile();
   rebuild();
   fit();
 }
@@ -80,10 +92,27 @@ function opts() {
   return o;
 }
 
+// Sets the profile-dependent sliders: the chosen profile, or the detected one on Auto.
+function applyProfile() {
+  const choice = $('profile').value;
+  const name = choice === 'auto' ? detected?.profile ?? 'person' : choice;
+  const prof = PROFILES[name];
+  for (const k of PROFILE_KEYS) {
+    $(k).value = prof[k];
+    $(`${k}V`).textContent = $(k).value;
+  }
+  $('profileNote').textContent = detected
+    ? `auto-detected: ${PROFILES[detected.profile].label} (phone ${detected.phoneHeight.toFixed(2)} m above floor)`
+    : '';
+}
+
 function rebuild() {
   if (!scan) return;
   grid = buildGrid(scan.frames, opts());
   gridImage = grid ? renderGridImage(grid) : null;
+  trav = grid ? traversability(grid) : null;
+  travImage = trav ? renderTravImage(grid, trav) : null;
+  computeRoute();
   renderStats();
   draw();
 }
@@ -123,6 +152,64 @@ function renderGridImage(g) {
   return off;
 }
 
+function renderTravImage(g, t) {
+  const off = document.createElement('canvas');
+  off.width = g.w;
+  off.height = g.h;
+  const octx = off.getContext('2d');
+  const img = octx.createImageData(g.w, g.h);
+  const accent = hexToRgb(cssColor('--accent'));
+  const occ = hexToRgb(cssColor('--fg'));
+  for (let i = 0; i < t.tier.length; i++) {
+    const j = i * 4;
+    if (t.tier[i] === TRAV.WALKED) {
+      img.data.set(accent, j);
+      img.data[j + 3] = 220;
+    } else if (t.tier[i] === TRAV.SEEN) {
+      img.data.set(accent, j);
+      img.data[j + 3] = 70;
+    } else if (g.L[i] > 1) {
+      img.data.set(occ, j);
+      img.data[j + 3] = 200;
+    }
+  }
+  octx.putImageData(img, 0, 0);
+  return off;
+}
+
+// ---- test route (A*) ----
+function toCellIndex([x, z]) {
+  const cx = Math.floor((x - grid.minX) / grid.cell), cz = Math.floor((z - grid.minZ) / grid.cell);
+  if (cx < 0 || cz < 0 || cx >= grid.w || cz >= grid.h) return -1;
+  return cz * grid.w + cx;
+}
+
+function computeRoute() {
+  route.path = null;
+  route.info = '';
+  if (!grid || !route.a || !route.b) return;
+  const a = toCellIndex(route.a), b = toCellIndex(route.b);
+  if (a < 0 || b < 0 || !isFinite(trav.cost[a]) || !isFinite(trav.cost[b])) {
+    route.info = 'endpoint is blocked/unknown: pick a teal cell';
+    return;
+  }
+  const path = astar(trav.cost, grid.w, grid.h, a, b);
+  if (!path) {
+    route.info = 'no route through known-passable cells';
+    return;
+  }
+  route.path = path;
+  let len = 0, walkedLen = 0;
+  for (let i = 1; i < path.length; i++) {
+    const p = path[i - 1], q = path[i];
+    const diag = (p % grid.w) !== (q % grid.w) && ((p / grid.w) | 0) !== ((q / grid.w) | 0);
+    const d = (diag ? Math.SQRT2 : 1) * grid.cell;
+    len += d;
+    if (trav.tier[q] === TRAV.WALKED) walkedLen += d;
+  }
+  route.info = `route ${len.toFixed(1)} m, ${Math.round((100 * walkedLen) / (len || 1))}% on walked paths`;
+}
+
 function renderStats() {
   const f = scan.frames;
   const pts = f.reduce((n, fr) => n + (fr.pts?.length || 0), 0);
@@ -143,6 +230,12 @@ function renderStats() {
   ];
   if (grid) {
     const c = grid.counts;
+    if (trav) {
+      const n = [0, 0, 0];
+      trav.tier.forEach((v) => n[v]++);
+      const m2 = grid.cell * grid.cell;
+      lines.push(`walked    ${(n[TRAV.WALKED] * m2).toFixed(1)} m²  floor seen ${(n[TRAV.SEEN] * m2).toFixed(1)} m²`);
+    }
     lines.push(
       `grid      ${grid.w}×${grid.h} @ ${grid.cell * 100} cm`,
       `extent    ${(grid.w * grid.cell).toFixed(1)} × ${(grid.h * grid.cell).toFixed(1)} m`,
@@ -186,9 +279,10 @@ function draw() {
   ctx.clearRect(0, 0, r.width, r.height);
   if (!scan) return;
 
-  if ($('showGrid').checked && gridImage) {
+  const layerImage = $('mapMode').value === 'trav' ? travImage : gridImage;
+  if ($('showGrid').checked && layerImage) {
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(gridImage, sx(grid.minX), sy(grid.minZ), grid.w * grid.cell * view.s, grid.h * grid.cell * view.s);
+    ctx.drawImage(layerImage, sx(grid.minX), sy(grid.minZ), grid.w * grid.cell * view.s, grid.h * grid.cell * view.s);
   }
 
   if ($('showPts').checked) {
@@ -218,8 +312,10 @@ function draw() {
     drawHeading(last);
   }
 
+  drawRoute();
   drawStartMarker();
   drawScaleBar(r);
+  $('routeInfo').textContent = route.info || (route.a ? 'click a destination' : 'click the map twice to test a route');
 }
 
 // Heading arrow at the latest pose: rotate viewer forward (0,0,-1) by q, project to X/Z.
@@ -238,6 +334,35 @@ function drawHeading(f) {
   ctx.beginPath();
   ctx.arc(px, py, 4, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawRoute() {
+  const cellCenter = (i) => [grid.minX + ((i % grid.w) + 0.5) * grid.cell, grid.minZ + (((i / grid.w) | 0) + 0.5) * grid.cell];
+  if (route.path) {
+    ctx.strokeStyle = ROUTE_COLOR;
+    ctx.lineWidth = 4;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    route.path.forEach((i, k) => {
+      const [x, z] = cellCenter(i);
+      k ? ctx.lineTo(sx(x), sy(z)) : ctx.moveTo(sx(x), sy(z));
+    });
+    ctx.stroke();
+  }
+  for (const [pt, label] of [[route.a, 'A'], [route.b, 'B']]) {
+    if (!pt) continue;
+    ctx.fillStyle = ROUTE_COLOR;
+    ctx.beginPath();
+    ctx.arc(sx(pt[0]), sy(pt[1]), 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#1b2026';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, sx(pt[0]), sy(pt[1]) + 0.5);
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+  }
 }
 
 function drawStartMarker() {
@@ -266,16 +391,27 @@ function drawScaleBar(r) {
 // ---- interaction ----
 let drag = null;
 canvas.addEventListener('pointerdown', (e) => {
-  drag = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy };
+  drag = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy, moved: false };
   canvas.setPointerCapture(e.pointerId);
 });
 canvas.addEventListener('pointermove', (e) => {
   if (!drag) return;
+  if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 4) drag.moved = true;
   view.ox = drag.ox + e.clientX - drag.x;
   view.oy = drag.oy + e.clientY - drag.y;
   draw();
 });
-canvas.addEventListener('pointerup', () => (drag = null));
+canvas.addEventListener('pointerup', (e) => {
+  const click = drag && !drag.moved;
+  drag = null;
+  if (!click || !grid) return;
+  const r = canvas.getBoundingClientRect();
+  const pt = [(e.clientX - r.left - view.ox) / view.s, (e.clientY - r.top - view.oy) / view.s];
+  if (!route.a || route.b) route = { a: pt, b: null, path: null, info: '' };
+  else route.b = pt;
+  computeRoute();
+  draw();
+});
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const r = canvas.getBoundingClientRect();
@@ -308,10 +444,15 @@ for (const k of SLIDERS) {
     rebuild();
   });
 }
-for (const id of ['showGrid', 'showPts', 'showTraj']) $(id).addEventListener('change', draw);
+for (const id of ['showGrid', 'showPts', 'showTraj', 'mapMode']) $(id).addEventListener('change', draw);
+$('profile').addEventListener('change', () => {
+  applyProfile();
+  rebuild();
+});
 window.addEventListener('resize', resize);
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (grid) gridImage = renderGridImage(grid);
+  if (trav) travImage = renderTravImage(grid, trav);
   draw();
 });
 

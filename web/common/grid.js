@@ -1,5 +1,5 @@
 // 2D log-odds occupancy grid on the X/Z plane (WebXR local-floor, Y up).
-import { FloorTracker } from '../common/floor.js';
+import { FloorTracker } from './floor.js';
 
 export const DEFAULTS = {
   cell: 0.05, // m; >= ARCore pose noise, <= half the smallest gap that matters
@@ -13,7 +13,25 @@ export const DEFAULTS = {
   lOcc: 0.85,
   lClamp: 5,
   pad: 0.5, // m around the data bounds
+  bodyRadius: 0.25, // m; half the width of whatever walked/drove the scan
+  maxStep: 1.0, // m; trajectory jumps longer than this (tracking glitches) aren't stamped as walked
 };
+
+// Who scanned / who will travel. Heights are above the tracked floor.
+export const PROFILES = {
+  person: { label: 'Person', floorMax: 0.1, wallMin: 0.2, wallMax: 2.0, clearBelow: 0.5, bodyRadius: 0.25 },
+  car: { label: 'RC car', floorMax: 0.05, wallMin: 0.07, wallMax: 0.45, clearBelow: 0.45, bodyRadius: 0.15 },
+};
+
+const CAR_MAX_PHONE_HEIGHT = 0.7; // m; a phone riding lower than this is on the car
+
+// Guess the profile from how high the phone rode above the tracked floor.
+export function detectProfile(frames) {
+  const floors = floorPerFrame(frames);
+  const hs = frames.map((f, i) => f.p[1] - floors[i]).sort((a, b) => a - b);
+  const median = hs[hs.length >> 1] ?? 1;
+  return { profile: median < CAR_MAX_PHONE_HEIGHT ? 'car' : 'person', phoneHeight: median };
+}
 
 const MAX_CELLS_PER_SIDE = 4000;
 
@@ -92,7 +110,27 @@ export function buildGrid(frames, opts = {}) {
     }
   });
 
-  return { w, h, minX, minZ, cell: o.cell, L, counts, floors, opts: o };
+  // Walked corridor: a body of bodyRadius physically passed along the trajectory, so those
+  // cells are proven passable no matter what the hits say.
+  const walked = new Uint8Array(w * h);
+  const r = Math.max(0, Math.round(o.bodyRadius / o.cell));
+  const disk = [];
+  for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dz * dz <= r * r) disk.push([dx, dz]);
+  const stamp = (x, z) => {
+    const [cx, cz] = toCell(x, z);
+    for (const [dx, dz] of disk) if (inside(cx + dx, cz + dz)) walked[(cz + dz) * w + cx + dx] = 1;
+  };
+  for (let i = 1; i < frames.length; i++) {
+    const [ax, , az] = frames[i - 1].p;
+    const [bx, , bz] = frames[i].p;
+    const len = Math.hypot(bx - ax, bz - az);
+    if (len > o.maxStep) continue;
+    const n = Math.max(1, Math.ceil(len / (o.cell / 2)));
+    for (let k = 0; k <= n; k++) stamp(ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n);
+  }
+  if (frames.length === 1) stamp(frames[0].p[0], frames[0].p[2]);
+
+  return { w, h, minX, minZ, cell: o.cell, L, walked, counts, floors, opts: o };
 }
 
 export function floorPerFrame(frames) {

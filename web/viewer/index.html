@@ -72,6 +72,18 @@
     label.slider input { grid-column: span 2; width: 100%; accent-color: var(--accent); }
     label.slider output { font-variant-numeric: tabular-nums; color: var(--muted); }
     label.check { display: flex; gap: 6px; align-items: center; margin-bottom: 4px; }
+    select {
+      width: 100%;
+      font: inherit;
+      padding: 6px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--bg);
+      color: var(--fg);
+      margin-bottom: 6px;
+    }
+    .note { color: var(--muted); font-size: 12px; }
+    .legend + .legend { margin-top: 4px; }
     #stats { font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
     #err { color: var(--bad); }
     main { position: relative; overflow: hidden; }
@@ -99,7 +111,18 @@
       <input id="file" type="file" accept=".jsonl,.json,.txt" hidden />
     </section>
     <section>
+      <h2>Profile</h2>
+      <select id="profile">
+        <option value="auto">Auto</option>
+        <option value="person">Person</option>
+        <option value="car">RC car</option>
+      </select>
+      <div id="profileNote" class="note"></div>
+    </section>
+    <section>
       <h2>Grid</h2>
+      <label class="slider">Body radius (m) <output id="bodyRadiusV"></output>
+        <input id="bodyRadius" type="range" min="0.05" max="0.5" step="0.01" /></label>
       <label class="slider">Floor: below (m above floor) <output id="floorMaxV"></output>
         <input id="floorMax" type="range" min="0" max="0.5" step="0.01" /></label>
       <label class="slider">Wall band: from (m above floor) <output id="wallMinV"></output>
@@ -113,7 +136,11 @@
     </section>
     <section>
       <h2>Layers</h2>
-      <label class="check"><input id="showGrid" type="checkbox" checked /> occupancy grid</label>
+      <select id="mapMode">
+        <option value="trav">Traversability</option>
+        <option value="occ">Occupancy grid</option>
+      </select>
+      <label class="check"><input id="showGrid" type="checkbox" checked /> map layer</label>
       <label class="check"><input id="showPts" type="checkbox" checked /> hit points</label>
       <label class="check"><input id="showTraj" type="checkbox" checked /> trajectory</label>
       <div class="legend">
@@ -122,6 +149,16 @@
         <span><i style="background:#9ca3af"></i>other</span>
         <span><i style="background:#e11d48"></i>path</span>
       </div>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i>walked</span>
+        <span><i style="background:var(--accent);opacity:.3"></i>floor seen</span>
+        <span><i style="background:var(--fg)"></i>obstacle</span>
+        <span><i style="background:#facc15"></i>test route</span>
+      </div>
+    </section>
+    <section>
+      <h2>Test route</h2>
+      <div id="routeInfo" class="note">click the map twice to test a route</div>
     </section>
     <section>
       <h2>Stats</h2>
