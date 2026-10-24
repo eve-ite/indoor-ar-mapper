@@ -142,9 +142,12 @@ async function combineChain({ keepView = false } = {}) {
     chain.texts.set(cid, await res.text());
   }
   const parsed = chain.ids.map((cid) => parseScan(chain.texts.get(cid)));
-  const m = mergeChain(parsed, { refine: $('autoAlign').checked, nudges: loadNudges() });
+  // Nudges saved in the scan files (continues_nudge) are the defaults; this browser's slider tweaks win.
+  const fileNudges = Object.fromEntries(parsed.filter((p) => p.header?.continues_nudge).map((p) => [p.header.session_id, p.header.continues_nudge]));
+  const nudges = { ...fileNudges, ...loadNudges() };
+  const m = mergeChain(parsed, { refine: $('autoAlign').checked, nudges });
+  syncNudgeSliders(); // texts are loaded now, so file nudges can show
   setParsed(`chain of ${chain.ids.length}`, { header: parsed[0].header, frames: m.frames, keyframes: m.keyframes, skipped: 0 }, { keepView });
-  const nudges = loadNudges();
   const nudged = (id) => (nudges[id] && (nudges[id].yawDeg || nudges[id].dx || nudges[id].dz) ? ' + manual nudge' : '');
   $('chainInfo').textContent = m.links
     .map((l) => {
@@ -159,7 +162,9 @@ async function combineChain({ keepView = false } = {}) {
 }
 
 function syncNudgeSliders() {
-  const n = loadNudges()[$('chainLink').value] || {};
+  const id = $('chainLink').value;
+  const fromFile = chain?.texts.has(id) ? parseScan(chain.texts.get(id)).header?.continues_nudge : null;
+  const n = loadNudges()[id] || fromFile || {};
   for (const [k, def] of [['nudgeYaw', 'yawDeg'], ['nudgeDx', 'dx'], ['nudgeDz', 'dz']]) {
     $(k).value = n[def] ?? 0;
     $(`${k}V`).textContent = $(k).value;

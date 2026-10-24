@@ -109,7 +109,8 @@ Short scans that continue each other, so one long walk becomes several crash-pro
 3. **Viewer:** load any scan in the chain, then tick **combine chain into one map**. Each scan is
    placed by matching its first pose to the previous scan's last pose (`web/common/chain.js`).
    - **Nudge sliders** (turn / x / z, per link, remembered) fix a sloppy handover by eye: line up
-     doubled walls.
+     doubled walls. A nudge can also be saved in the scan file itself as `continues_nudge`
+     ({yawDeg, dx, dz}); browser slider tweaks override it.
    - **Auto-align (experimental)** matches obstacles between the scans. It's conservative: it
      never moved a good placement in tests, but along long plain walls the overlap is ambiguous,
      so it only partly fixes a sloppy one.
