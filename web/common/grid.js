@@ -15,6 +15,7 @@ export const DEFAULTS = {
   pad: 0.5, // m around the data bounds
   bodyRadius: 0.25, // m; half the width of whatever walked/drove the scan
   maxStep: 1.0, // m; trajectory jumps longer than this (tracking glitches) aren't stamped as walked
+  clearBand: 0.15, // m: a later ray passing within this of where an obstacle was seen clears it
   depthMargin: 0.04, // m; extra height tolerance for depth samples (noisier than plane hits)...
   depthMarginPerM: 0.02, // ...plus this much per meter of range, since depth noise grows with distance
 };
@@ -68,9 +69,18 @@ export function buildGrid(frames, opts = {}) {
     L[i] = Math.max(-o.lClamp, Math.min(o.lClamp, L[i] + dl));
   };
 
+  // "Newest wins" bookkeeping (seconds, frame time; chains have one increasing timeline):
+  // obsT = last obstacle hit, clearT = last time a ray passed through at the height the obstacle
+  // was seen (proof it has gone), walkedT = last time the phone/car passed through.
+  const NEVER = -1e9;
+  const obsT = new Float32Array(w * h).fill(NEVER);
+  const clearT = new Float32Array(w * h).fill(NEVER);
+  const walkedT = new Float32Array(w * h).fill(NEVER);
+  const obsTop = new Float32Array(w * h); // highest obstacle hit per cell (m above floor), for 3D blocks
+
   // Bresenham from (x0,z0) to (x1,z1): every cell before the endpoint is free.
   // A ray passing high over a cell doesn't prove there's no table under it, so it only counts weakly.
-  const traceFree = (x0, z0, y0, x1, z1, y1) => {
+  const traceFree = (x0, z0, y0, x1, z1, y1, t) => {
     let dx = Math.abs(x1 - x0), dz = -Math.abs(z1 - z0);
     const sx = x0 < x1 ? 1 : -1, sz = z0 < z1 ? 1 : -1;
     const steps = Math.max(dx, -dz) || 1;
@@ -78,6 +88,10 @@ export function buildGrid(frames, opts = {}) {
     for (let k = 0; !(x0 === x1 && z0 === z1); k++) {
       const y = y0 + ((y1 - y0) * k) / steps;
       bump(x0, z0, y <= o.clearBelow ? o.lFree : o.lFree * o.overheadFree);
+      if (inside(x0, z0)) {
+        const c = z0 * w + x0;
+        if (obsTop[c] > 0 && Math.abs(y - obsTop[c]) <= o.clearBand) clearT[c] = t; // went through it: gone
+      }
       const e2 = 2 * err;
       if (e2 >= dz) { err += dz; x0 += sx; }
       if (e2 <= dx) { err += dx; z0 += sz; }
@@ -89,7 +103,6 @@ export function buildGrid(frames, opts = {}) {
   // obs counts obstacle hits per cell on their own, so floor seen *under* a table can't vote the
   // table away (trav.js decides from it).
   const obs = new Uint16Array(w * h);
-  const obsTop = new Float32Array(w * h); // highest obstacle hit per cell (m above floor), for 3D blocks
   const counts = { floor: 0, wall: 0, ignored: 0 };
   frames.forEach((f, i) => {
     const floor = floors[i];
@@ -104,15 +117,16 @@ export function buildGrid(frames, opts = {}) {
         const [cx, cz] = toCell(hx, hz);
         const cls = classifyHeight(hitH, o, hitMargin(f, hit, isDepth, o));
         if (cls === 'floor') {
-          traceFree(px, pz, phoneH, cx, cz, hitH);
+          traceFree(px, pz, phoneH, cx, cz, hitH, f.t);
           bump(cx, cz, o.lFree);
           counts.floor++;
         } else if (cls === 'wall') {
-          traceFree(px, pz, phoneH, cx, cz, hitH);
+          traceFree(px, pz, phoneH, cx, cz, hitH, f.t);
           bump(cx, cz, o.lOcc);
           if (inside(cx, cz)) {
             const c = cz * w + cx;
             obs[c] = Math.min(65535, obs[c] + 1);
+            obsT[c] = f.t;
             obsTop[c] = Math.max(obsTop[c], Math.min(hitH, o.wallMax));
           }
           counts.wall++;
@@ -129,9 +143,14 @@ export function buildGrid(frames, opts = {}) {
   const r = Math.max(0, Math.round(o.bodyRadius / o.cell));
   const disk = [];
   for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dz * dz <= r * r) disk.push([dx, dz]);
-  const stamp = (x, z) => {
+  const stamp = (x, z, t) => {
     const [cx, cz] = toCell(x, z);
-    for (const [dx, dz] of disk) if (inside(cx + dx, cz + dz)) walked[(cz + dz) * w + cx + dx] = 1;
+    for (const [dx, dz] of disk) {
+      if (!inside(cx + dx, cz + dz)) continue;
+      const c = (cz + dz) * w + cx + dx;
+      walked[c] = 1;
+      walkedT[c] = Math.max(walkedT[c], t);
+    }
   };
   for (let i = 1; i < frames.length; i++) {
     const [ax, , az] = frames[i - 1].p;
@@ -139,11 +158,11 @@ export function buildGrid(frames, opts = {}) {
     const len = Math.hypot(bx - ax, bz - az);
     if (len > o.maxStep) continue;
     const n = Math.max(1, Math.ceil(len / (o.cell / 2)));
-    for (let k = 0; k <= n; k++) stamp(ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n);
+    for (let k = 0; k <= n; k++) stamp(ax + ((bx - ax) * k) / n, az + ((bz - az) * k) / n, frames[i].t);
   }
-  if (frames.length === 1) stamp(frames[0].p[0], frames[0].p[2]);
+  if (frames.length === 1) stamp(frames[0].p[0], frames[0].p[2], frames[0].t);
 
-  return { w, h, minX, minZ, cell: o.cell, L, obs, obsTop, walked, counts, floors, opts: o };
+  return { w, h, minX, minZ, cell: o.cell, L, obs, obsTop, obsT, clearT, walked, walkedT, counts, floors, opts: o };
 }
 
 export function floorPerFrame(frames) {

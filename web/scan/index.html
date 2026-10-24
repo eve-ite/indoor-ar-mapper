@@ -28,6 +28,17 @@
     body.in-ar #overlay { justify-content: space-between; }
     h1 { font-size: 20px; margin: 0; }
     body.in-ar h1, body.in-ar .hide-in-ar { display: none; }
+    body:not(.in-ar) .ar-only { display: none !important; }
+    #labelRow { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    #labelName {
+      font: 600 18px system-ui, sans-serif;
+      padding: 12px;
+      border-radius: 12px;
+      border: 0;
+      background: rgba(0, 0, 0, 0.6);
+      color: var(--fg);
+      min-width: 0;
+    }
     #status {
       background: rgba(0, 0, 0, 0.55);
       border-radius: 12px;
@@ -111,6 +122,10 @@
       <button id="start" class="primary wide" disabled>Start scan</button>
       <button id="continue" class="wide" hidden disabled>Continue from last scan</button>
       <button id="stop" class="stop wide" hidden>Stop</button>
+      <div id="labelRow" class="wide ar-only">
+        <input id="labelName" type="text" placeholder="Room / place name" autocomplete="off" enterkeyhint="done" />
+        <button id="labelBtn">Label here</button>
+      </div>
       <button id="download" class="hide-in-ar" disabled>Download</button>
       <button id="upload" class="hide-in-ar" disabled>Upload</button>
     </div>

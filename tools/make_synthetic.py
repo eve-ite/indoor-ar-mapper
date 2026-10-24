@@ -66,7 +66,21 @@ def depth_samples(o, yaw, rng):
     return out
 
 
+def arg(name, default=None):
+    """--name value from argv (for the moved-furniture test)."""
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+if arg("--table"):  # --table x0,z0,x1,z1 (height stays 0.75 m)
+    x0, z0, x1, z1 = map(float, arg("--table").split(","))
+    TABLE = ((x0, 0.0, z0), (x1, 0.75, z1))
+
+SHORT_LOOP = [(0, 0), (0, -1.3), (0.9, -1.0), (0.6, -0.3), (0, 0)]
+
+
 def waypoints():
+    if arg("--path") == "short":
+        return SHORT_LOOP
     # loop around the table, starting at the origin facing -Z
     return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.7, -3.2), (1.7, -1.8), (0.8, -0.5), (0, 0)]
 
@@ -79,7 +93,7 @@ def main():
     lines = [
         {
             "type": "header",
-            "session_id": "synthetic_depth" if depth else "synthetic",
+            "session_id": arg("--id") or ("synthetic_depth" if depth else "synthetic"),
             "device": "synthetic",
             "ref_space": "local-floor",
             "start_marker": {"p": [0, 0, 0], "q": [0, 0, 0, 1]},
@@ -88,7 +102,8 @@ def main():
             "fan": {"rays": [[y, p] for p in PITCHES for y in YAWS], "origin": "viewer"},
         }
     ]
-    t, speed = 0.0, 0.5
+    t, speed = float(arg("--t0", 0)), 0.5
+    sway = float(arg("--sway", 0.25))  # rad: how much the user looks around
     wps = waypoints()
     for (x0, z0), (x1, z1) in zip(wps, wps[1:]):
         seg = math.hypot(x1 - x0, z1 - z0)
@@ -98,7 +113,7 @@ def main():
             s = i / steps
             px, pz = x0 + (x1 - x0) * s, z0 + (z1 - z0) * s
             py = 1.4 + 0.02 * math.sin(t * 6)  # walking bob
-            yaw = heading + 0.25 * math.sin(t * 0.9)  # looking around a bit
+            yaw = heading + sway * math.sin(t * 0.9)  # looking around a bit
             o = (px, py, pz)
             pts = []
             for p_deg in PITCHES:

@@ -20,6 +20,9 @@ const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 let scan = null; // { name, header, frames, skipped, stats }
 let serverScans = []; // summaries from /api/scans (incl. continues/chain links)
 let chain = null; // { ids, texts: Map id -> JSONL } for the loaded scan's chain, or null
+let labelKey = null; // server id whose viewer-added labels apply (the scan, or the chain's root)
+let viewerLabels = []; // labels added in the viewer: [{ name, p: [x, y, z] }] in labelKey's coordinates
+let addingLabel = false;
 let grid = null;
 let gridImage = null;
 let trav = null;
@@ -63,7 +66,9 @@ async function loadFromServer(id) {
     const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
     if (!res.ok) throw new Error(`${res.status}`);
     const text = await res.text();
+    labelKey = id;
     setScan(id, text);
+    loadViewerLabels();
     document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
     setupChain(id, text);
   } catch (err) {
@@ -74,7 +79,10 @@ async function loadFromServer(id) {
 function loadFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
+    labelKey = null; // local file: viewer labels can't be saved
+    viewerLabels = [];
     setScan(file.name, reader.result);
+    renderLabels();
     setupChain(null);
   };
   reader.readAsText(file);
@@ -101,6 +109,7 @@ function setParsed(name, parsed, { keepView = false } = {}) {
   applyProfile();
   rebuild();
   if (!keepView) fit();
+  renderLabels();
 }
 
 // ---- scan chains: scans started where the previous one ended ----
@@ -147,7 +156,11 @@ async function combineChain({ keepView = false } = {}) {
   const nudges = { ...fileNudges, ...loadNudges() };
   const m = mergeChain(parsed, { refine: $('autoAlign').checked, nudges });
   syncNudgeSliders(); // texts are loaded now, so file nudges can show
-  setParsed(`chain of ${chain.ids.length}`, { header: parsed[0].header, frames: m.frames, keyframes: m.keyframes, skipped: 0 }, { keepView });
+  setParsed(`chain of ${chain.ids.length}`, { header: parsed[0].header, frames: m.frames, keyframes: m.keyframes, labels: m.labels, skipped: 0 }, { keepView });
+  if (labelKey !== chain.ids[0]) {
+    labelKey = chain.ids[0]; // combined map = the root scan's coordinates
+    loadViewerLabels();
+  }
   const nudged = (id) => (nudges[id] && (nudges[id].yawDeg || nudges[id].dx || nudges[id].dz) ? ' + manual nudge' : '');
   $('chainInfo').textContent = m.links
     .map((l) => {
@@ -389,7 +402,9 @@ function ensure3d() {
   if (!view3d) {
     view3d = new View3D($('view3d'), cssColor);
     view3d.onPick = (x, z) => addRoutePoint([x, z]);
+    view3d.setFloorPlan($('floorPlan').checked);
     if (grid) view3d.setMap(grid, trav);
+    view3d.setLabels(allLabels());
   }
   return view3d;
 }
@@ -410,6 +425,7 @@ function sync3dRoute() {
 
 function addRoutePoint(pt) {
   if (!grid) return;
+  if (addingLabel) return placeLabel(pt);
   if (!route.a || route.b) route = { a: pt, b: null, path: null, info: '' };
   else route.b = pt;
   computeRoute();
@@ -454,6 +470,104 @@ function drawDebug(r) {
 
   drawRoute();
   drawStartMarker();
+  drawLabels2d();
+}
+
+// ---- room labels ----
+const allLabels = () => [
+  ...(scan?.labels || []).map((l) => ({ ...l, source: 'scan' })),
+  ...viewerLabels.map((l, i) => ({ ...l, source: 'viewer', index: i })),
+];
+
+async function loadViewerLabels() {
+  viewerLabels = [];
+  if (labelKey) {
+    try {
+      const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(labelKey)}/labels`);
+      if (res.ok) viewerLabels = await res.json();
+    } catch {}
+  }
+  renderLabels();
+}
+
+async function saveViewerLabels() {
+  if (!labelKey) return ($('labelNote').textContent = 'Labels on a dropped file are not saved (open it from the server list).');
+  try {
+    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(labelKey)}/labels`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(viewerLabels),
+    });
+    if (!res.ok) throw new Error(res.status);
+  } catch (err) {
+    $('labelNote').textContent = `Couldn't save labels: ${err.message}`;
+  }
+}
+
+function placeLabel([x, z]) {
+  addingLabel = false;
+  $('addLabel').classList.remove('active');
+  const name = (prompt('Name for this spot (e.g. 2101, Judging room):') || '').trim();
+  if (!name) return;
+  viewerLabels.push({ name: name.slice(0, 80), p: [Math.round(x * 1000) / 1000, 0, Math.round(z * 1000) / 1000] });
+  renderLabels();
+  saveViewerLabels();
+}
+
+// Route from point A (if set) or the start marker to a label.
+function routeTo(l) {
+  const from = route.a && !route.b ? route.a : [0, 0];
+  route = { a: from, b: [l.p[0], l.p[2]], path: null, info: '' };
+  computeRoute();
+  draw();
+  if (route.path) $('routeInfo').textContent = `to ${l.name}: ${route.info}`;
+}
+
+function renderLabels() {
+  const list = allLabels();
+  view3d?.setLabels(list);
+  const box = $('labels');
+  box.replaceChildren(
+    ...list.map((l) => {
+      const row = document.createElement('div');
+      row.className = 'label-row';
+      const name = document.createElement('span');
+      name.textContent = l.name;
+      name.title = l.source === 'scan' ? 'labelled while scanning' : 'added in the viewer';
+      const go = Object.assign(document.createElement('button'), { textContent: 'Route here', type: 'button' });
+      go.onclick = () => routeTo(l);
+      row.append(name, go);
+      if (l.source === 'viewer') {
+        const del = Object.assign(document.createElement('button'), { textContent: '✕', type: 'button', title: 'Remove label' });
+        del.onclick = () => {
+          viewerLabels.splice(l.index, 1);
+          renderLabels();
+          saveViewerLabels();
+        };
+        row.append(del);
+      }
+      return row;
+    }),
+  );
+  if (!list.length) box.textContent = 'No rooms labelled yet.';
+  if (mode === 'debug') draw();
+}
+
+function drawLabels2d() {
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  for (const l of allLabels()) {
+    const x = sx(l.p[0]), y = sy(l.p[2]);
+    const tw = ctx.measureText(l.name).width;
+    ctx.fillStyle = cssColor('--accent');
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(x + 7, y - 9, tw + 10, 18);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(l.name, x + 12, y + 0.5);
+  }
+  ctx.textBaseline = 'alphabetic';
 }
 
 // Heading arrow at the latest pose: rotate viewer forward (0,0,-1) by q, project to X/Z.
@@ -597,6 +711,23 @@ $('zoomIn').onclick = () => (mode === 'map' ? ensure3d().zoom(1.4) : zoomCenter(
 $('zoomOut').onclick = () => (mode === 'map' ? ensure3d().zoom(1 / 1.4) : zoomCenter(1 / 1.4));
 $('zoomFit').onclick = fit;
 $('topDown').onclick = () => ensure3d().topDown();
+$('addLabel').onclick = () => {
+  addingLabel = !addingLabel;
+  $('addLabel').classList.toggle('active', addingLabel);
+  $('labelNote').textContent = addingLabel ? 'Click the spot on the map (e.g. the doorway).' : '';
+};
+try {
+  $('floorPlan').checked = localStorage.getItem('iam-floor-plan') === '1';
+} catch {}
+$('floorPlan').onchange = () => {
+  try {
+    localStorage.setItem('iam-floor-plan', $('floorPlan').checked ? '1' : '0');
+  } catch {}
+  if (view3d) {
+    view3d.setFloorPlan($('floorPlan').checked);
+    if (grid) view3d.setMap(grid, trav);
+  }
+};
 
 // ---- Map / Debug mode (remembered) ----
 function setMode(m) {
@@ -649,7 +780,9 @@ for (const id of ['showGrid', 'showPts', 'showTraj', 'mapMode']) $(id).addEventL
 $('combine').addEventListener('change', () => {
   if ($('combine').checked) combineChain().catch(showChainErr);
   else if (chain) {
+    labelKey = chain.loadedId;
     setScan(chain.loadedId, chain.texts.get(chain.loadedId));
+    loadViewerLabels();
     $('chainInfo').textContent = 'Showing one scan.';
   }
 });

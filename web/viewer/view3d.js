@@ -4,6 +4,9 @@ import * as THREE from 'three';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 import { TRAV } from '../common/trav.js';
 import { close, dropSpecks } from './mapstyle.js';
+import { wallMask } from '../common/plan.js';
+
+const PLAN_WALL_H = 1.2; // m: uniform wall height in floor-plan mode (reads like a plan, not a skyline)
 
 const BLOCK = 2; // grid cells per block side (2 x 5 cm = 10 cm blocks)
 const MIN_OBSTACLE_CELLS = 10; // hide specks under 2.5 dm² (routing still sees them)
@@ -36,7 +39,9 @@ export class View3D {
 
     this.mapGroup = new THREE.Group();
     this.routeGroup = new THREE.Group();
-    this.scene.add(this.mapGroup, this.routeGroup);
+    this.labelGroup = new THREE.Group(); // room labels: name tag on a post
+    this.scene.add(this.mapGroup, this.routeGroup, this.labelGroup);
+    this.floorPlan = false;
 
     this.onPick = null;
     this.pickFloor();
@@ -93,6 +98,11 @@ export class View3D {
     }
   }
 
+  // Floor-plan mode: structure only (walls), uniform height, plain floor. Display-only.
+  setFloorPlan(on) {
+    this.floorPlan = on;
+  }
+
   setMap(grid, trav) {
     this.clear(this.mapGroup);
     const { w, h, cell, minX, minZ } = grid;
@@ -109,7 +119,7 @@ export class View3D {
     const known = close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2);
     for (let i = 0; i < w * h; i++) {
       if (!known[i]) continue;
-      img.data.set(trav.tier[i] === TRAV.WALKED ? walkRGB : floorRGB, i * 4);
+      img.data.set(trav.tier[i] === TRAV.WALKED && !this.floorPlan ? walkRGB : floorRGB, i * 4);
       img.data[i * 4 + 3] = 255;
     }
     tctx.putImageData(img, 0, 0);
@@ -126,7 +136,8 @@ export class View3D {
     this.mapGroup.add(floor);
 
     // Blocks: obstacle mask cleaned up, then one box per BLOCK x BLOCK group of cells.
-    const mask = dropSpecks(close(Uint8Array.from(trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS);
+    const source = this.floorPlan ? wallMask(grid, trav.occ) : Uint8Array.from(trav.occ);
+    const mask = dropSpecks(close(source, w, h, 3), w, h, MIN_OBSTACLE_CELLS);
     const blocks = [];
     for (let bz = 0; bz < h; bz += BLOCK) {
       for (let bx = 0; bx < w; bx += BLOCK) {
@@ -183,7 +194,7 @@ export class View3D {
     const high = new THREE.Color(this.color('--map-obst-edge'));
     const c = new THREE.Color();
     blocks.forEach((b, k) => {
-      const hgt = Math.max(MIN_BLOCK_H, b.smoothTop);
+      const hgt = this.floorPlan ? PLAN_WALL_H : Math.max(MIN_BLOCK_H, b.smoothTop);
       m.makeScale(size * 0.98, hgt, size * 0.98);
       m.setPosition(minX + (b.bx + BLOCK / 2) * cell, 0, minZ + (b.bz + BLOCK / 2) * cell);
       mesh.setMatrixAt(k, m);
@@ -211,6 +222,43 @@ export class View3D {
     sc.far = span * 3;
     sc.updateProjectionMatrix();
     this.blockCount = blocks.length;
+    this.render();
+  }
+
+  // labels: [{ name, p: [x, y, z] }]. A name tag on a thin post at each spot, always readable.
+  setLabels(labels) {
+    this.clear(this.labelGroup);
+    for (const l of labels || []) {
+      const c = document.createElement('canvas');
+      const ctx = c.getContext('2d');
+      const font = 'bold 44px system-ui, sans-serif';
+      ctx.font = font;
+      const tw = Math.ceil(ctx.measureText(l.name).width);
+      c.width = tw + 40;
+      c.height = 72;
+      ctx.font = font;
+      ctx.fillStyle = this.color('--map-route');
+      ctx.beginPath();
+      ctx.roundRect(0, 0, c.width, c.height, 18);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(l.name, 20, c.height / 2 + 2);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }));
+      const hPx = 0.045; // fraction of the view height: tags stay readable at any zoom
+      tag.scale.set((hPx * c.width) / c.height, hPx, 1);
+      tag.position.set(l.p[0], 1.6, l.p[2]);
+      tag.renderOrder = 10;
+      const post = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.02, 1.6, 8),
+        new THREE.MeshStandardMaterial({ color: this.color('--map-route') }),
+      );
+      post.position.set(l.p[0], 0.8, l.p[2]);
+      post.castShadow = true;
+      this.labelGroup.add(tag, post);
+    }
     this.render();
   }
 

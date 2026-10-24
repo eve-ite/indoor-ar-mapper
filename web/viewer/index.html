@@ -115,6 +115,9 @@
     .legend + .legend { margin-top: 4px; }
     #stats { font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
     #err { color: var(--bad); }
+    .label-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-bottom: 4px; color: var(--fg); font-size: 13px; }
+    .label-row button, .small-btn { font: inherit; font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+    .small-btn.active { border-color: var(--accent); color: var(--accent); }
     #nudgeReset { font: inherit; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; margin-bottom: 6px; }
     main { position: relative; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
@@ -175,6 +178,17 @@
       <h2>Or a local file</h2>
       <div id="drop">Drop a .jsonl here or click to pick</div>
       <input id="file" type="file" accept=".jsonl,.json,.txt" hidden />
+    </section>
+    <section>
+      <h2>Rooms</h2>
+      <div id="labels" class="note">No rooms labelled yet.</div>
+      <button id="addLabel" class="small-btn" type="button">+ Add label</button>
+      <div id="labelNote" class="note"></div>
+    </section>
+    <section class="map-only">
+      <h2>View</h2>
+      <label class="check"><input id="floorPlan" type="checkbox" /> floor plan (walls only, hide furniture)</label>
+      <div class="note">Display only: routes still avoid furniture.</div>
     </section>
     <section id="chain" hidden>
       <h2>Chain</h2>

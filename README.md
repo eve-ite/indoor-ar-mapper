@@ -118,3 +118,43 @@ Short scans that continue each other, so one long walk becomes several crash-pro
 Tests: `node tools/test_chain.mjs` (split a synthetic scan, re-place it with a 4°/15 cm handover
 error). Demo chain: `node tools/make_chain.mjs scans/synthetic_depth.jsonl scans/chain --err 4,0.15,-0.1`,
 then open `/viewer/?scan=chain_b&combine=1`.
+
+## Room labels, newest-scan-wins, floor plan (branch `scan-chaining`)
+
+- **Labels while scanning:** stand at the place (e.g. in the doorway), type the room name in the
+  box under Stop, and tap **Label here**. Recorded as `{"type":"label","t","name","p":[x,floorY,z]}`
+  at the phone's spot. Chained scans carry their labels into the combined map.
+- **Labels in the viewer:** the Rooms panel has **+ Add label** (click a spot, name it) and ✕ to
+  remove. They're saved to `scans/<id>_labels.json` (`GET/PUT /api/scans/{id}/labels`), in that
+  scan's coordinates, or the chain root's when combined. **Route here** routes from point A, or from
+  the start marker if no A is set.
+- **Newest wins** (`grid.js` keeps per-cell `obsT` / `clearT` / `walkedT`; `trav.js` decides):
+  - an obstacle is dropped when a ray passes through at the height it was seen, more than
+    `recencySlack` (15 s) later. Rays passing *under* a table don't count.
+  - an obstacle seen more than 15 s after you walked a spot blocks that walked corridor (e.g. a
+    table moved onto it).
+  - evidence from the same pass is never treated as a change.
+  - Test: `node tools/test_moved.mjs` (two synthetic visits, the table moved onto the first visit's
+    path).
+- **Floor plan** (Map view → View): structure only (`common/plan.js`). A wall is anything seen above
+  1 m, or a long thin run (≥ 2 m, mostly empty bounding box). It's drawn at a uniform 1.2 m on a
+  plain floor. **Display only:** routing still avoids furniture. From car height everything is low,
+  so only the long-thin rule applies there.
+
+## Not built yet: live re-routing during navigation (for the M5 nav app)
+
+Furniture moves after scanning. The nav app should notice obstacles on the route and re-plan,
+**without slowing the walker or taxing the phone**:
+- **Keep the AR frame loop light:** don't block rendering for sensing. People may walk fast; arrows
+  must stay smooth at 30–60 fps.
+- **Sense sparsely:** depth (if available) at **2 Hz** on a **small grid** (e.g. 8 × 3 samples, the
+  lower-middle of the view), or 3–5 hit-test rays straight ahead. Skip a sample when the previous one
+  is still being processed. Pause sensing entirely when the phone is pointed at the floor or sky.
+- **Only look ahead:** check only samples within ~4 m of the phone **and** within ~0.6 m of the
+  remaining route. Ignore everything else.
+- **Re-plan rarely and locally:** mark new obstacle cells in a small overlay (not a full grid
+  rebuild). Re-run A* only when the overlay intersects the next ~5 m of the route, at most **once
+  per second**, and on a window around the phone (cheap), then rejoin the global path.
+- **Forget:** overlay obstacles expire after ~60 s unless seen again (people walk past).
+- **Fail soft:** if sensing isn't available (no depth, few hits), just follow the precomputed
+  route. The map's newest-wins data plus the car's ultrasonic stop are the backstops.

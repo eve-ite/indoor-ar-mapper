@@ -7,6 +7,7 @@ export const APP_VERSION = '0.1';
 export function parseScan(text) {
   let header = null;
   const frames = [];
+  const labels = []; // room/place names recorded while scanning: { t, name, p: [x, floorY, z] }
   let skipped = 0;
   for (const line of text.split('\n')) {
     const s = line.trim();
@@ -20,8 +21,9 @@ export function parseScan(text) {
     }
     if (obj.type === 'header' && !header) header = obj;
     else if (obj.type === 'frame' && Array.isArray(obj.p)) frames.push(obj);
+    else if (obj.type === 'label' && Array.isArray(obj.p) && obj.name) labels.push(obj);
   }
-  return { header, frames, skipped };
+  return { header, frames, labels, skipped };
 }
 
 export function toLine(obj) {

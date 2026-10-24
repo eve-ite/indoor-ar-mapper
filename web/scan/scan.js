@@ -40,6 +40,8 @@ const ui = {
   download: $('download'),
   upload: $('upload'),
   saved: $('saved'),
+  labelName: $('labelName'),
+  labelBtn: $('labelBtn'),
   depth: $('depthToggle'),
   device: $('deviceName'),
 };
@@ -212,7 +214,7 @@ function renderStatus() {
       : `depth off${depthRequested ? ' (not granted)' : ''}\n`) +
     `frames ${rec.frames}  points ${rec.points}  hit ${hitPct}%\n` +
     `per-ray % ${perRay}\n` +
-    `saved ${rec.savedFrames}/${rec.frames}`;
+    `saved ${rec.savedFrames}/${rec.frames}${rec.labels ? `  labels ${rec.labels}` : ''}`;
 }
 
 // ---- session ----
@@ -307,6 +309,7 @@ async function startScan(continueFrom = null) {
     lastT: 0,
     lastRecT: -Infinity,
     floor: new FloorTracker(),
+    labels: 0,
     lastObstacleT: 0,
     depthFrames: 0,
     depthPoints: 0,
@@ -460,6 +463,23 @@ function flush() {
   });
 }
 
+// Room labels: stand at the place (e.g. in the doorway), type its name, tap "Label here".
+// Recorded at the phone's spot on the tracked floor: {"type":"label","t","name","p":[x,floorY,z]}.
+function addLabel() {
+  const name = ui.labelName.value.trim();
+  if (!rec?.lastPose) return say('Start scanning first, then label where you stand.', 'warn');
+  if (!name) return say('Type a name first (e.g. 2101 or "Judging room").', 'warn');
+  const [x, , z] = rec.lastPose.p;
+  const line = toLine({ type: 'label', t: rec.lastT ? r3(rec.lastT) : 0, name, p: [x, r3(rec.floor.y), z] });
+  rec.lines.push(line);
+  rec.pending += line;
+  rec.labels++;
+  ui.labelName.value = '';
+  ui.labelName.blur();
+  say(`Labelled "${name}" here ✓`);
+  renderStatus();
+}
+
 function stopScan() {
   if (session) session.end(); // onSessionEnd does the rest
 }
@@ -593,6 +613,8 @@ ui.cont.onclick = () => {
   if (end) startWith(end);
 };
 ui.stop.onclick = stopScan;
+ui.labelBtn.onclick = addLabel;
+ui.labelName.addEventListener('keydown', (e) => e.key === 'Enter' && addLabel());
 ui.download.onclick = () => lastScan && downloadText(lastScan.id, lastScan.text);
 ui.upload.onclick = () => lastScan && uploadText(lastScan.id, lastScan.text);
 window.addEventListener('pagehide', flush);

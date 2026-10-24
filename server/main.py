@@ -90,6 +90,34 @@ def get_scan(scan_id: str):
     return FileResponse(path, media_type="application/x-ndjson")
 
 
+# ---- labels added in the viewer: scans/<id>_labels.json, in that scan's (chain root's) coordinates ----
+@app.get("/api/scans/{scan_id}/labels")
+def get_labels(scan_id: str):
+    if not SAFE_ID.match(scan_id):
+        raise HTTPException(400, "bad id")
+    path = SCANS_DIR / f"{scan_id}_labels.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+
+@app.put("/api/scans/{scan_id}/labels")
+async def put_labels(scan_id: str, request: Request):
+    if not SAFE_ID.match(scan_id):
+        raise HTTPException(400, "bad id")
+    try:
+        labels = json.loads(await request.body())
+    except json.JSONDecodeError:
+        raise HTTPException(400, "not JSON")
+    ok = isinstance(labels, list) and len(labels) <= 500 and all(
+        isinstance(l, dict) and isinstance(l.get("name"), str) and 0 < len(l["name"]) <= 80
+        and isinstance(l.get("p"), list) and len(l["p"]) == 3 and all(isinstance(v, (int, float)) for v in l["p"])
+        for l in labels
+    )
+    if not ok:
+        raise HTTPException(400, "expected [{name, p:[x,y,z]}]")
+    (SCANS_DIR / f"{scan_id}_labels.json").write_text(json.dumps(labels), encoding="utf-8")
+    return {"saved": len(labels)}
+
+
 # M3: WebSocket relay for car drive commands goes here (ESP32 dials out to the tunnel via wss://).
 
 

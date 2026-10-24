@@ -207,6 +207,7 @@ export function mergeChain(scans, { refine = false, nudges = {} } = {}) {
   const root = scans[0];
   let frames = root.frames.slice();
   let keyframes = (root.keyframes || []).slice();
+  let labels = (root.labels || []).map((l) => ({ ...l, scan: root.header?.session_id }));
   const links = [];
   let prev = { frames: root.frames, floors: floorPerFrame(root.frames), Tprev: { yaw: 0, tx: 0, tz: 0 }, dyPrev: 0 };
   let tEnd = frames.at(-1)?.t ?? 0;
@@ -231,11 +232,17 @@ export function mergeChain(scans, { refine = false, nudges = {} } = {}) {
     const moved = scan.frames.map((f) => transformFrame(f, Troot, dy, dt));
     frames = frames.concat(moved);
     keyframes = keyframes.concat((scan.keyframes || []).map((k) => ({ ...transformFrame(k, Troot, dy, dt), scan: id })));
+    labels = labels.concat(
+      (scan.labels || []).map((l) => {
+        const [x, z] = apply(Troot, l.p[0], l.p[2]);
+        return { ...l, t: r3(l.t + dt), p: [r3(x), r3(l.p[1] + dy), r3(z)], scan: id };
+      }),
+    );
     links.push({ id, T: Troot, refine: refineInfo, pivot: apply(prev.Tprev, pivot[0], pivot[1]) });
     prev = { frames: scan.frames, floors, Tprev: Troot, dyPrev: dy };
     tEnd = moved.at(-1)?.t ?? tEnd;
   }
-  return { frames, keyframes, links };
+  return { frames, keyframes, labels, links };
 }
 
 // Order a chain from server summaries: [{ id, continues }] -> ids root..leaf for the chain of `id`.
