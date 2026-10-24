@@ -1,9 +1,33 @@
-# Car (M3): keyboard teleop over wifi
+# Car (M3): keyboard teleop
 
 ```
+PRIMARY (Bluetooth LE, no wifi/server/hotspot):
+laptop Chrome /teleop ◄──Web Bluetooth (NUS-style UART)──► ESP32-S3 car "mapper-car"
+
+SECONDARY (CONTROL_LINK = LINK_WIFI in config.h):
 laptop browser /teleop ──ws──► server /drive ──relay──► server /car ◄──wss── ESP32-S3 car
-       ▲  telemetry ◄──────────────────────────────────────────────────────────┘
 ```
+
+**Drive over Bluetooth:**
+1. Open `http://localhost:8000/teleop/` in **Chrome or Edge**. Brave disables Web Bluetooth,
+   and Web Bluetooth needs localhost or https, so `file://` won't work.
+2. Click **Connect Bluetooth** and pick **mapper-car**.
+
+The server only serves the page; driving doesn't go through it.
+
+**BLE protocol:**
+- **Service:** `6e400001-b5a3-f393-e0a9-e50e24dcca9e`. The page writes to RX `…0002` and the car
+  notifies on TX `…0003`.
+- **Messages:** the same JSON as below, each one a `\n`-terminated line, split into MTU-sized
+  pieces and re-joined at the newline.
+- The car serves one central at a time and advertises again as soon as it's free.
+
+**Behaviour seen on the real board:**
+- Commands arrive at 20 Hz.
+- Telemetry comes back at 10 Hz.
+- The deadman stops the car **301 ms** after the last command.
+- When a page closes or disconnects, Windows keeps the BLE link open for about 3 s, so the
+  **deadman** is what stops the car within 300 ms, not the disconnect event.
 
 - `firmware/car/`: car firmware (ESP32-S3 N16R8). Pins and tunables in `config.h`.
 - `firmware/bringup_*`: one-job test sketches for wiring things up (see `WIRING.md`).
@@ -14,13 +38,13 @@ laptop browser /teleop ──ws──► server /drive ──relay──► serv
 
 **Safety lives on the car:**
 - If no command arrives for 300 ms, it stops and switches the coils off.
-- If the WebSocket drops, it stops immediately.
+- If the link drops (BLE central or WebSocket), it stops as soon as it notices.
 - Forward is refused while the ultrasonic reads under 15 cm (and until it reads over 18 cm again).
 - Reverse and turning always work.
 
 The teleop page also sends stops on key release, window blur, tab hidden and page close.
 
-## Networking (venue wifi, no hotspots)
+## WiFi mode (secondary; set `CONTROL_LINK LINK_WIFI` in config.h)
 
 The car joins the venue wifi as an ordinary client and **dials out** to the laptop's cloudflared
 tunnel: `wss://<random>.trycloudflare.com/car`. This works through client isolation and doesn't
@@ -83,6 +107,22 @@ Then open `http://localhost:8000/teleop/` on the laptop (or `<tunnel>/teleop/` o
 
 **Status pills:** they show whether the server and the car are connected, and "car silent" means
 telemetry has stopped arriving.
+
+## Dev tools (board on COM11)
+
+```sh
+uv run --with pyserial car/tools/serial_tail.py COM11 --seconds 10 [--reset]   # serial log
+uv run --with bleak car/tools/ble_services.py                                # GATT table
+uv run --with bleak car/tools/ble_probe.py echo                              # with bringup_ble_echo
+uv run --with bleak car/tools/ble_probe.py drive --end silent|disconnect     # deadman tests
+```
+
+- **`bringup_hello`** prints chip info.
+- **`bringup_ble_echo`** echoes lines back. Pair it with `/teleop/ble-test.html` in Chrome.
+
+Only one program can open COM11 at a time (close the Arduino serial monitor first). If the
+car stops advertising after a test, a central is still holding it: close other BLE pages, or
+reset the board with `--reset`.
 
 ## Without hardware
 
