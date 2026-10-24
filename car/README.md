@@ -56,6 +56,7 @@ the venue only has those, ask the organizers for a device/IoT network.
    - Board **ESP32S3 Dev Module**
    - Flash Size **16MB (128Mb)**
    - PSRAM **OPI PSRAM**
+   - Partition Scheme **16M Flash (3MB APP/9.9MB FATFS)** (TLS + WiFi make the app ~1.1 MB; the default 1.2 MB app slot is 84% full)
    - plug in the DevKitC's **"COM"/"UART" USB port** and pick that port
 5. Upload, then open the Serial Monitor at **115200**. You should see the MPU6050 status, the
    config, then `[ws] connected`.
@@ -63,7 +64,7 @@ the venue only has those, ask the organizers for a device/IoT network.
 Command line (what the repo was checked with):
 
 ```sh
-arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi car/firmware/car
+arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB car/firmware/car
 ```
 
 ## Run it
