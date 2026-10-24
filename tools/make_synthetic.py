@@ -1,7 +1,7 @@
 """Generate a synthetic scan JSONL: a 4 x 5 m room with a table, walked in a loop.
 
 Mimics the scan app: local-floor (Y up), phone at ~1.4 m, fan of hit-test rays
-(yaw +-35 deg, pitch 0 / -25 deg), random hit dropouts and pose noise.
+(yaw +-35 deg, pitch 0/-10/-20/-30 deg), random hit dropouts and pose noise.
 
   python tools/make_synthetic.py scans/synthetic.jsonl [--truncate]
 """
@@ -14,7 +14,7 @@ import sys
 ROOM = ((-2.0, 0.0, -4.5), (2.0, 2.5, 0.5))  # min, max corners (x, y, z)
 TABLE = ((0.3, 0.0, -2.8), (1.3, 0.75, -2.2))
 YAWS = [-35 + 70 * i / 6 for i in range(7)]
-PITCHES = [0, -25]
+PITCHES = [0, -10, -20, -30]
 HZ = 10
 DROPOUT = 0.35  # textureless walls -> missing hits
 NOISE = 0.01

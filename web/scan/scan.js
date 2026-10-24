@@ -9,11 +9,14 @@ const RECORD_HZ = 10;
 const FLUSH_EVERY_FRAMES = 20; // IndexedDB write every ~2 s
 const FAN_HALF_ANGLE_DEG = 35; // ~camera FOV; wider rays only hit planes seen earlier
 const FAN_YAW_STEPS = 7;
-const FAN_PITCHES_DEG = [0, -25];
+// Several rows so the sweep crosses every height between the phone and the floor: a single
+// level row at hand height flies over tables (0.75 m) and only ever sees the floor ahead.
+const FAN_PITCHES_DEG = [0, -10, -20, -30];
 const MAX_VIS_POINTS = 4000;
 const HINT_WINDOW_S = 3;
+const NO_OBSTACLE_NAG_S = 8; // open aisles legitimately have stretches with nothing in reach
 const WALL_MIN_ABOVE_FLOOR = 0.2; // m; matches the viewer's default wall band
-const PITCH_LIMIT_DEG = 12; // nag if the camera points further up/down than this
+const PITCH_LIMIT_DEG = 20; // nag if the camera points further up/down than this
 const MAX_SPEED = 0.6; // m/s
 
 const params = new URLSearchParams(location.search);
@@ -124,12 +127,14 @@ function renderStatus() {
   }
   const elapsed = rec.lastT.toFixed(1);
   const hitPct = rec.rayTries ? Math.round((100 * rec.points) / rec.rayTries) : 0;
-  const perRay = rec.rayTries
-    ? rec.rayHits.map((h) => Math.round((100 * h * rec.rays.length) / rec.rayTries)).join(' ')
-    : '';
+  // One row of per-ray hit % per pitch, left-to-right in yaw.
+  const pct = rec.rayHits.map((h) => (rec.frames ? Math.round((100 * h) / rec.frames) : 0));
+  const perRay = FAN_PITCHES_DEG.map(
+    (p, row) => `\n ${String(p).padStart(3)}°: ` + pct.slice(row * FAN_YAW_STEPS, (row + 1) * FAN_YAW_STEPS).map((v) => String(v).padStart(3)).join(''),
+  ).join('');
   ui.status.textContent =
     `REC ${rec.header.session_id}  ${elapsed}s\n` +
-    `tracking ${trackingState}\n` +
+    `tracking ${trackingState}  ${Math.round(rec.fps)} fps\n` +
     `frames ${rec.frames}  points ${rec.points}  hit ${hitPct}%\n` +
     `per-ray % ${perRay}\n` +
     `saved ${rec.savedFrames}/${rec.frames}`;
@@ -198,6 +203,9 @@ async function startScan() {
     lastT: 0,
     lastRecT: -Infinity,
     floor: new FloorTracker(),
+    lastObstacleT: 0,
+    fps: 0,
+    lastFrameTime: null,
     recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
   };
   showHint('warn', 'Move side to side ↔', 'Let ARCore find the floor before walking off');
@@ -213,6 +221,11 @@ function onXRFrame(time, frame) {
   if (!frame || !rec) return;
 
   if (rec.t0 === null) rec.t0 = time;
+  if (rec.lastFrameTime !== null && time > rec.lastFrameTime) {
+    const inst = 1000 / (time - rec.lastFrameTime);
+    rec.fps = rec.fps ? rec.fps + 0.05 * (inst - rec.fps) : inst;
+  }
+  rec.lastFrameTime = time;
   const t = (time - rec.t0) / 1000;
   rec.lastT = t;
 
@@ -289,9 +302,11 @@ function pitchDeg({ x, y, z, w }) {
 
 function updateHint(ori) {
   const r = rec.recent;
-  const span = r.length > 1 ? r.at(-1).t - r[0].t : 0;
+  const t = r.at(-1).t;
+  const span = r.length > 1 ? t - r[0].t : 0;
   const hits = r.reduce((n, f) => n + f.hits, 0);
   const walls = r.reduce((n, f) => n + f.walls, 0);
+  if (walls) rec.lastObstacleT = t;
   const speed = span > 0.5 ? Math.hypot(r.at(-1).x - r[0].x, r.at(-1).z - r[0].z) / span : 0;
   const pitch = pitchDeg(ori);
 
@@ -301,8 +316,10 @@ function updateHint(ori) {
   if (span < 1) return; // keep the startup hint until we have a window to judge
   if (!hits) return showHint('warn', 'Move side to side ↔', 'ARCore needs to see things shift to find surfaces');
   if (speed > MAX_SPEED) return showHint('warn', 'Slow down', `${speed.toFixed(1)} m/s, aim for under ${MAX_SPEED}`);
-  if (!walls) return showHint('warn', 'Find the walls: step sideways ↔', 'Walk along a wall with the phone angled toward it');
-  showHint('ok', 'Looking good ✓', `${walls} wall hits in the last ${HINT_WINDOW_S} s, keep it slow`);
+  if (t - rec.lastObstacleT > NO_OBSTACLE_NAG_S) {
+    return showHint('warn', 'No obstacles seen lately', 'Angle the phone toward the edges (tables, walls, shelves)');
+  }
+  showHint('ok', 'Looking good ✓', walls ? `${walls} obstacle hits in the last ${HINT_WINDOW_S} s` : 'Floor only right now, that’s fine');
 }
 
 function flush() {

@@ -32,7 +32,7 @@ cloudflared prints a `https://<random>.trycloudflare.com` URL (new one every res
 ## Scanning tips
 
 - Stand on the **start marker** (taped X), facing the agreed direction, then tap Start. The `local-floor` origin is wherever the session starts, so this is what makes scans line up with each other and with navigation.
-- The fake lidar is a fan of 14 hit-test rays (±35° yaw × pitch 0°/−25°, `FAN_*` in `web/scan/scan.js`). Chrome's hit test (as far as we know) hits only **ARCore-detected planes**, and ARCore needs **parallax** to find them: move slowly with some sideways motion. Pure rotation finds nothing new.
+- The fake lidar is a fan of 28 hit-test rays (7 yaws over ±35° × pitch 0°/−10°/−20°/−30°, `FAN_*` in `web/scan/scan.js`). Multiple rows matter: a level ray at hand height flies over tables, so the downward rows are what sweep across table tops. Chrome's hit test (as far as we know) hits only **ARCore-detected planes**, and ARCore needs **parallax** to find them: move slowly with some sideways motion. Pure rotation finds nothing new.
 - Side walls get picked up well when moving forward; the wall straight ahead less so. Blank walls give few hits: keep lights on, add posters/tape.
 - The status line shows **per-ray hit %**. Use it on the S23 to see which rays earn their keep.
 - **On the car (M4):** mount the phone **offset from the turning axis** (e.g. front of the deck) so turns include translation. Drive slowly, in arcs rather than spins.
