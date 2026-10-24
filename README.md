@@ -41,7 +41,26 @@ cloudflared prints a `https://<random>.trycloudflare.com` URL (new one every res
 
 - Pick a scan from the server list, or drop a file. `?scan=<id>` loads one directly.
 - Grid: 5 cm cells, log-odds. Trajectory cells are free; Bresenham from the phone to each hit frees the cells in between. A hit below *floor* marks free, a hit inside the *wall band* marks occupied, anything else is ignored.
-- **Ray clears below:** a ray only fully clears a cell where it passes below this height. Higher passes count weakly, so a handheld ray at 1.4 m doesn't erase the table it flies over. Lower it for handheld, raise it for car scans.
+- **Ray clears below:** a ray only clears a cell where it passes below this height. A ray passing higher proves nothing about what's under it, so a handheld ray at 1.4 m doesn't erase the table it flies over.
+- **Heights are above the tracked floor** (`common/floor.js`), not local-floor's y=0, which drifts and can start out wrong.
+
+### Traversability (what navigation uses)
+
+`common/trav.js`, shown with the *Traversability* layer. Three tiers, by trust:
+
+| Tier | From | A* |
+|---|---|---|
+| walked | trajectory widened by body radius: something physically passed | cost 1, never vetoed |
+| floor seen | free evidence from floor hits | cost 4 |
+| blocked | obstacles (inflated by body radius) and unknown cells | impassable |
+
+So a cluttered hallway you walked through stays a hallway, and routes stick to proven paths. Click the map twice (or `?route=ax,az,bx,bz`) to test a route.
+
+**Profiles:** *Person* (obstacles 0.2–2 m, radius 0.25 m) or *RC car* (obstacles 0.07–0.45 m, radius 0.15 m; floor under tables counts as passable). Auto-detected from the phone's median height above the floor (< 0.7 m means car).
+
+### Depth lidar (optional)
+
+The scan app requests WebXR `depth-sensing` (CPU path only) as an **optional** feature. If Chrome grants it, each frame also samples the depth map on a 16 × 5 grid (`common/depth.js`) and stores world points as `dpts`. Depth sees *any* surface, including clutter that ARCore never turns into planes. If it's refused, the session starts without it and the plane fan works as before. The status line says `depth ON` or `depth off`. Depth samples get an extra 8 cm height margin, because they're noisier than plane hits.
 - Drag to pan, wheel to zoom, double-click to fit. −Z (the start-marker forward direction) is up.
 
 ## Data format (JSON Lines)
@@ -54,6 +73,8 @@ One JSON object per line, so a crash only loses the last line. Meters, WebXR `lo
 {"type":"stats","frames":420,"points":3100,"ray_tries":5880,"ray_hits":[...],"duration":42.1}
 ```
 
+Frames may also carry `dpts` (depth-map samples, same units). The header then has a `depth` object with the usage, format and sampling grid. `pts` are plane hits, which share exact heights per plane; the floor tracker uses only those.
+
 `tracking` is `normal` or `limited` (emulated position). Lost-tracking frames aren't recorded. Frames are recorded at 10 Hz. `stats` is written on Stop, so a scan missing it was interrupted.
 
 ## Layout
@@ -64,7 +85,7 @@ web/scan/               phone scan app (WebXR + three.js, IndexedDB mirror)
 web/viewer/             laptop map viewer (canvas) + grid.js
 web/common/jsonl.js     shared tolerant parser
 web/vendor/             three.js r170 (vendored so the phone needs no CDN)
-tools/make_synthetic.py synthetic 4×5 m room scan for testing the viewer
+tools/make_synthetic.py synthetic 4×5 m room scan (--depth adds depth samples)
 scans/                  uploads (gitignored)
 ```
 

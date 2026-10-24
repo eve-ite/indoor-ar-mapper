@@ -2,6 +2,7 @@
 import * as THREE from '../vendor/three.module.min.js';
 import { APP_VERSION, r3, toLine } from '../common/jsonl.js';
 import { FloorTracker } from '../common/floor.js';
+import { DEPTH_COLS, DEPTH_MAX, DEPTH_MIN, DEPTH_ROWS, sampleDepth } from '../common/depth.js';
 import * as store from './store.js';
 
 // ---- config ----
@@ -80,6 +81,8 @@ let rec = null; // { header, lines[], pending, frames, points, t0, lastT, rayHit
 let lastScan = null; // { id, text }
 let session = null;
 let hitSources = [];
+let depthOn = false;
+
 
 // ---- three.js (only needed to drive the XR frame loop + show coverage dots) ----
 // Created on first Start so a WebGL failure can't break the page before it can explain itself.
@@ -135,6 +138,9 @@ function renderStatus() {
   ui.status.textContent =
     `REC ${rec.header.session_id}  ${elapsed}s\n` +
     `tracking ${trackingState}  ${Math.round(rec.fps)} fps\n` +
+    (depthOn
+      ? `depth ON  ${rec.depthFrames}/${rec.frames} frames  ${rec.depthPoints} pts\n`
+      : `depth off (planes only)\n`) +
     `frames ${rec.frames}  points ${rec.points}  hit ${hitPct}%\n` +
     `per-ray % ${perRay}\n` +
     `saved ${rec.savedFrames}/${rec.frames}`;
@@ -147,11 +153,22 @@ async function startScan() {
   try {
     ensureRenderer();
     const overlayRoot = $('overlay');
-    session = await navigator.xr.requestSession('immersive-ar', {
+    const base = {
       requiredFeatures: ['local-floor', 'hit-test'],
       optionalFeatures: ['dom-overlay'],
       domOverlay: { root: overlayRoot },
-    });
+    };
+    try {
+      // Depth is optional: CPU path only (the GPU sample's shader failed on the S23).
+      session = await navigator.xr.requestSession('immersive-ar', {
+        ...base,
+        optionalFeatures: [...base.optionalFeatures, 'depth-sensing'],
+        depthSensing: { usagePreference: ['cpu-optimized'], dataFormatPreference: ['luminance-alpha', 'float32'] },
+      });
+    } catch (err) {
+      console.warn('depth session failed, retrying without depth:', err);
+      session = await navigator.xr.requestSession('immersive-ar', base);
+    }
   } catch (err) {
     say(`Could not start AR: ${err.message}`, 'bad');
     ui.start.disabled = false;
@@ -165,6 +182,8 @@ async function startScan() {
 
   session.addEventListener('end', onSessionEnd);
   await renderer.xr.setSession(session);
+
+  depthOn = session.depthUsage === 'cpu-optimized';
 
   const viewerSpace = await session.requestReferenceSpace('viewer');
   const rays = fanRays();
@@ -186,6 +205,10 @@ async function startScan() {
     created: new Date().toISOString(),
     app_version: APP_VERSION,
     fan: { rays, origin: 'viewer' }, // [yawDeg, pitchDeg] per hit-test source
+    // dpts in frames = depth-map samples (any surface), pts = plane hit-test hits
+    depth: depthOn
+      ? { usage: session.depthUsage, format: session.depthDataFormat, rows: DEPTH_ROWS, cols: DEPTH_COLS, range: [DEPTH_MIN, DEPTH_MAX] }
+      : null,
   };
   const headerLine = toLine(header);
   rec = {
@@ -204,6 +227,8 @@ async function startScan() {
     lastRecT: -Infinity,
     floor: new FloorTracker(),
     lastObstacleT: 0,
+    depthFrames: 0,
+    depthPoints: 0,
     fps: 0,
     lastFrameTime: null,
     recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
@@ -257,9 +282,17 @@ function onXRFrame(time, frame) {
   });
   rec.rayTries += hitSources.length;
 
+  const dpts = depthOn ? sampleDepth(frame, pose.views[0]) : null;
+  if (dpts) {
+    rec.depthFrames++;
+    rec.depthPoints += dpts.length;
+    for (const d of dpts) addVisPoint(d[0], d[1], d[2]);
+  }
+
+  // Floor from plane hits only: they're exact, depth samples are noisy.
   const floorY = rec.floor.update(pos.y, pts);
-  const walls = pts.filter((h) => h[1] - floorY >= WALL_MIN_ABOVE_FLOOR).length;
-  rec.recent.push({ t, x: pos.x, z: pos.z, hits: pts.length, walls });
+  const walls = [...pts, ...(dpts || [])].filter((h) => h[1] - floorY >= WALL_MIN_ABOVE_FLOOR).length;
+  rec.recent.push({ t, x: pos.x, z: pos.z, hits: pts.length + (dpts?.length || 0), walls });
   while (rec.recent.length && rec.recent[0].t < t - HINT_WINDOW_S) rec.recent.shift();
   updateHint(ori);
 
@@ -270,6 +303,7 @@ function onXRFrame(time, frame) {
     q: [r3(ori.x), r3(ori.y), r3(ori.z), r3(ori.w)],
     tracking: trackingState,
     pts,
+    ...(dpts ? { dpts } : {}),
   });
   rec.lines.push(line);
   rec.pending += line;
@@ -355,6 +389,8 @@ async function onSessionEnd() {
       points: rec.points,
       ray_tries: rec.rayTries,
       ray_hits: rec.rayHits,
+      depth_frames: rec.depthFrames,
+      depth_points: rec.depthPoints,
       duration: r3(rec.lastT),
     });
     rec.lines.push(statsLine);

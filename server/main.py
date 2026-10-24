@@ -39,7 +39,7 @@ def summarize(path: Path) -> dict:
                 header = obj
             elif obj.get("type") == "frame":
                 frames += 1
-                points += len(obj.get("pts") or [])
+                points += len(obj.get("pts") or []) + len(obj.get("dpts") or [])
     return {
         "id": path.stem,
         "created": (header or {}).get("created"),

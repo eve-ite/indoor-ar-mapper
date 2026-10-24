@@ -8,13 +8,14 @@ export const DEFAULTS = {
   wallMax: 2.0,
   maxRange: 6.0, // ignore hits farther than this from the phone (m, in X/Z)
   clearBelow: 0.5, // a ray only fully clears a cell where it passes below this height (tables, chairs)
-  overheadFree: 0.2, // free-update weight where the ray passes above clearBelow
+  overheadFree: 0, // free weight where the ray passes above clearBelow: it proves nothing about what is under it
   lFree: -0.4,
   lOcc: 0.85,
   lClamp: 5,
   pad: 0.5, // m around the data bounds
   bodyRadius: 0.25, // m; half the width of whatever walked/drove the scan
   maxStep: 1.0, // m; trajectory jumps longer than this (tracking glitches) aren't stamped as walked
+  depthMargin: 0.08, // m; extra height tolerance for depth samples (noisier than plane hits)
 };
 
 // Who scanned / who will travel. Heights are above the tracked floor.
@@ -47,7 +48,7 @@ export function buildGrid(frames, opts = {}) {
   };
   for (const f of frames) {
     grow(f.p[0], f.p[2]);
-    for (const h of f.pts || []) {
+    for (const h of allHits(f)) {
       if (Math.hypot(h[0] - f.p[0], h[2] - f.p[2]) <= o.maxRange) grow(h[0], h[2]);
     }
   }
@@ -90,12 +91,12 @@ export function buildGrid(frames, opts = {}) {
     const phoneH = f.p[1] - floor;
     const [px, pz] = toCell(f.p[0], f.p[2]);
     bump(px, pz, o.lFree); // the phone/car was physically here
-    for (const hit of f.pts || []) {
+    for (const [hits, margin] of [[f.pts, 0], [f.dpts, o.depthMargin]]) for (const hit of hits || []) {
       const [hx, hy, hz] = hit;
       const hitH = hy - floor;
       if (Math.hypot(hx - f.p[0], hz - f.p[2]) > o.maxRange) { counts.ignored++; continue; }
       const [cx, cz] = toCell(hx, hz);
-      const cls = classifyHeight(hitH, o);
+      const cls = classifyHeight(hitH, o, margin);
       if (cls === 'floor') {
         traceFree(px, pz, phoneH, cx, cz, hitH);
         bump(cx, cz, o.lFree);
@@ -138,9 +139,15 @@ export function floorPerFrame(frames) {
   return frames.map((f) => tracker.update(f.p[1], f.pts || []));
 }
 
-// y is height above the tracked floor.
-export function classifyHeight(y, o) {
-  if (y < o.floorMax) return 'floor';
-  if (y >= o.wallMin && y <= o.wallMax) return 'wall';
+// y is height above the tracked floor. margin widens the floor band and raises the obstacle
+// floor for noisy sources (depth samples), so floor noise doesn't read as low obstacles.
+export function classifyHeight(y, o, margin = 0) {
+  if (y < o.floorMax + margin) return 'floor';
+  if (y >= o.wallMin + margin && y <= o.wallMax) return 'wall';
   return 'other';
+}
+
+// Plane hit-test hits (pts) + depth-map samples (dpts, when the scan had depth).
+export function allHits(f) {
+  return f.dpts ? [...(f.pts || []), ...f.dpts] : f.pts || [];
 }

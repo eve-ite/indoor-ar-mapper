@@ -3,7 +3,7 @@
 Mimics the scan app: local-floor (Y up), phone at ~1.4 m, fan of hit-test rays
 (yaw +-35 deg, pitch 0/-10/-20/-30 deg), random hit dropouts and pose noise.
 
-  python tools/make_synthetic.py scans/synthetic.jsonl [--truncate]
+  python tools/make_synthetic.py scans/synthetic.jsonl [--truncate] [--depth]
 """
 
 import json
@@ -18,6 +18,7 @@ PITCHES = [0, -10, -20, -30]
 HZ = 10
 DROPOUT = 0.35  # textureless walls -> missing hits
 NOISE = 0.01
+DEPTH_NOISE = 0.02  # relative range noise, roughly ARCore depth-from-motion
 
 
 def quat_yaw(yaw):
@@ -49,19 +50,36 @@ def ray_box_enter(o, d, lo, hi):
     return tmin if tmin <= tmax else math.inf
 
 
+def depth_samples(o, yaw, rng):
+    """Depth-map samples: a 16 x 5 grid over ~60 x 45 deg below the horizon, 2% range noise."""
+    out = []
+    for p_deg in (-5, -14, -23, -32, -41):
+        for i in range(16):
+            a = yaw + math.radians(-30 + 60 * i / 15)
+            b = math.radians(p_deg)
+            d = (-math.sin(a) * math.cos(b), math.sin(b), -math.cos(a) * math.cos(b))
+            tt = min(ray_box_exit(o, d, *ROOM), ray_box_enter(o, d, *TABLE))
+            if not 0.3 < tt < 5:
+                continue
+            tt *= 1 + rng.gauss(0, DEPTH_NOISE)
+            out.append([round(o[k] + d[k] * tt, 3) for k in range(3)])
+    return out
+
+
 def waypoints():
     # loop around the table, starting at the origin facing -Z
-    return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.5, -1.5), (0.8, -0.5), (0, 0)]
+    return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.7, -3.2), (1.7, -1.8), (0.8, -0.5), (0, 0)]
 
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "synthetic.jsonl"
     truncate = "--truncate" in sys.argv
+    depth = "--depth" in sys.argv
     rng = random.Random(42)
     lines = [
         {
             "type": "header",
-            "session_id": "synthetic",
+            "session_id": "synthetic_depth" if depth else "synthetic",
             "device": "synthetic",
             "ref_space": "local-floor",
             "start_marker": {"p": [0, 0, 0], "q": [0, 0, 0, 1]},
@@ -95,16 +113,19 @@ def main():
                         continue
                     h = [round(o[k] + d[k] * tt + rng.gauss(0, NOISE), 3) for k in range(3)]
                     pts.append(h)
-            lines.append(
-                {
-                    "type": "frame",
-                    "t": round(t, 3),
-                    "p": [round(px, 3), round(py, 3), round(pz, 3)],
-                    "q": [round(v, 4) for v in quat_yaw(yaw)],
-                    "tracking": "normal",
-                    "pts": pts,
-                }
-            )
+            frame = {
+                "type": "frame",
+                "t": round(t, 3),
+                "p": [round(px, 3), round(py, 3), round(pz, 3)],
+                "q": [round(v, 4) for v in quat_yaw(yaw)],
+                "tracking": "normal",
+                "pts": pts,
+            }
+            if depth:
+                # Like the real S23: plane hit-test only finds the floor; depth sees everything.
+                frame["pts"] = [h for h in pts if h[1] < 0.05]
+                frame["dpts"] = depth_samples(o, yaw, rng)
+            lines.append(frame)
             t += 1 / HZ
     text = "".join(json.dumps(l, separators=(",", ":")) + "\n" for l in lines)
     if truncate:

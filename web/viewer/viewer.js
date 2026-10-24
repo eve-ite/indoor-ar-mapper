@@ -213,6 +213,7 @@ function computeRoute() {
 function renderStats() {
   const f = scan.frames;
   const pts = f.reduce((n, fr) => n + (fr.pts?.length || 0), 0);
+  const dpts = f.reduce((n, fr) => n + (fr.dpts?.length || 0), 0);
   const tracking = {};
   for (const fr of f) tracking[fr.tracking] = (tracking[fr.tracking] || 0) + 1;
   let len = 0;
@@ -225,7 +226,7 @@ function renderStats() {
     `frames    ${f.length}${scan.skipped ? `  (skipped ${scan.skipped} bad lines)` : ''}`,
     `duration  ${(f.at(-1).t ?? 0).toFixed(1)} s`,
     `path      ${len.toFixed(1)} m`,
-    `points    ${pts}`,
+    `points    ${pts} plane${dpts ? `  + ${dpts} depth` : '  (no depth in this scan)'}`,
     `tracking  ${Object.entries(tracking).map(([k, v]) => `${k}:${v}`).join(' ')}`,
   ];
   if (grid) {
@@ -293,9 +294,11 @@ function draw() {
       ctx.globalAlpha = cls === 'wall' ? 0.8 : 0.45;
       for (const [i, f] of scan.frames.entries()) {
         const floor = grid ? grid.floors[i] : 0;
-        for (const h of f.pts || []) {
-          if (classifyHeight(h[1] - floor, o) !== cls) continue;
-          ctx.fillRect(sx(h[0]) - size / 2, sy(h[2]) - size / 2, size, size);
+        for (const [hits, margin] of [[f.pts, 0], [f.dpts, o.depthMargin]]) {
+          for (const h of hits || []) {
+            if (classifyHeight(h[1] - floor, o, margin) !== cls) continue;
+            ctx.fillRect(sx(h[0]) - size / 2, sy(h[2]) - size / 2, size, size);
+          }
         }
       }
     }
