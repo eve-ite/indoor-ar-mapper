@@ -158,3 +158,31 @@ Furniture moves after scanning. The nav app should notice obstacles on the route
 - **Forget:** overlay obstacles expire after ~60 s unless seen again (people walk past).
 - **Fail soft:** if sensing isn't available (no depth, few hits), just follow the precomputed
   route. The map's newest-wins data plus the car's ultrasonic stop are the backstops.
+
+## Wide hallways, speed, real vs simulated (branch `scan-chaining`)
+
+- **Wide hallways:** the camera only sees about ±30° to each side, so walls beside you never enter
+  the picture while you walk straight.
+  - Depth now reaches **8 m** (was 5 m; ARCore's practical limit), with a sample row just above
+    the image centre. The grid keeps hits up to 9 m.
+  - The scan hint asks **"Glance left ↶" / "Glance right ↷"** when you're walking and nothing
+    has been seen on one side for 6 s.
+  - Synthetic test (walk straight down the middle; side walls mapped):
+
+    | Width | Old app | New 8 m range | + glancing |
+    |---|---|---|---|
+    | 6 m | 0% | 75% | 91% |
+    | 8 m | 0% | 0% | 89% |
+
+    Reproduce: `python tools/make_synthetic.py scans/hall.jsonl --depth --room -4,-20,4,1 --path hall --sway 0.7 --depth-max 8 --rows-up`.
+- **Viewer speed:** `close()` (mask clean-up) is now two chamfer passes instead of a disk loop: on
+  a 5 M-cell venue grid ~0.3 s instead of up to 2.6 s, with identical output
+  (`node tools/test_close.mjs`).
+  - The 3D view keeps the normal and floor-plan versions built (the other one is pre-built while
+    idle), so the floor-plan toggle is ~1 ms.
+  - 2D debug images are only built in Debug mode.
+  - The camera's clipping range is sized to the map, which fixes tilted big maps being cut off at
+    the far end.
+- **Real vs simulated:** the server marks scans with device `synthetic` (or `"simulated": true`,
+  which the generator now writes) as simulated. The viewer shows **REAL · device** or
+  **SIMULATED** badges in the scan list, and a chip on the map.

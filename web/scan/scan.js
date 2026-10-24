@@ -16,6 +16,8 @@ const FAN_PITCHES_DEG = [0, -10, -20, -30];
 const MAX_VIS_POINTS = 4000;
 const HINT_WINDOW_S = 3;
 const NO_OBSTACLE_NAG_S = 8; // open aisles legitimately have stretches with nothing in reach
+const SIDE_GLANCE_S = 6; // walking with nothing seen on one side this long: ask for a quick glance
+const WALKING_SPEED = 0.25; // m/s: below this you're looking around anyway
 const WALL_MIN_ABOVE_FLOOR = 0.2; // m; matches the viewer's default wall band
 const PITCH_LIMIT_DEG = 20; // nag if the camera points further up/down than this
 const MAX_SPEED = 0.6; // m/s
@@ -311,6 +313,8 @@ async function startScan(continueFrom = null) {
     floor: new FloorTracker(),
     labels: 0,
     lastObstacleT: 0,
+    lastLeftT: 0, // last obstacle hit on each side of the walking direction (wide hallways)
+    lastRightT: 0,
     depthFrames: 0,
     depthPoints: 0,
     depthMs: 0,
@@ -385,7 +389,16 @@ function onXRFrame(time, frame) {
 
   // Floor from plane hits only: they're exact, depth samples are noisy.
   const floorY = rec.floor.update(pos.y, pts);
-  const walls = [...pts, ...(dpts || [])].filter((h) => h[1] - floorY >= WALL_MIN_ABOVE_FLOOR).length;
+  const wallPts = [...pts, ...(dpts || [])].filter((h) => h[1] - floorY >= WALL_MIN_ABOVE_FLOOR);
+  const walls = wallPts.length;
+  // Which side of the heading are they on? (right = +X when facing -Z)
+  const yaw = Math.atan2(-2 * (ori.x * ori.z + ori.w * ori.y) * -1, (1 - 2 * (ori.x * ori.x + ori.y * ori.y)));
+  const rx = Math.cos(yaw), rz = -Math.sin(yaw);
+  for (const h of wallPts) {
+    const side = (h[0] - pos.x) * rx + (h[2] - pos.z) * rz;
+    if (side > 0.5) rec.lastRightT = t;
+    else if (side < -0.5) rec.lastLeftT = t;
+  }
   rec.recent.push({ t, x: pos.x, z: pos.z, hits: pts.length + (dpts?.length || 0), walls });
   while (rec.recent.length && rec.recent[0].t < t - HINT_WINDOW_S) rec.recent.shift();
   updateHint(ori);
@@ -445,6 +458,16 @@ function updateHint(ori) {
   if (span < 1) return; // keep the startup hint until we have a window to judge
   if (!hits) return showHint('warn', 'Move side to side ↔', 'ARCore needs to see things shift to find surfaces');
   if (speed > MAX_SPEED) return showHint('warn', 'Slow down', `${speed.toFixed(1)} m/s, aim for under ${MAX_SPEED}`);
+  // Wide hallways: the camera only sees ~30 deg to each side, so walls beside you never enter the
+  // picture while you walk straight. A one-second glance fixes it.
+  if (speed > WALKING_SPEED) {
+    const left = t - rec.lastLeftT, right = t - rec.lastRightT;
+    if (Math.max(left, right) > SIDE_GLANCE_S) {
+      return left >= right
+        ? showHint('warn', 'Glance left ↶', 'Quick look at the left side, then carry on')
+        : showHint('warn', 'Glance right ↷', 'Quick look at the right side, then carry on');
+    }
+  }
   if (t - rec.lastObstacleT > NO_OBSTACLE_NAG_S) {
     return showHint('warn', 'No obstacles seen lately', 'Angle the phone toward the edges (tables, walls, shelves)');
   }

@@ -49,8 +49,11 @@ async function loadServerList() {
       ...list.map((s) => {
         const b = document.createElement('button');
         b.dataset.id = s.id;
-        b.innerHTML = `<div></div><div class="meta"></div>`;
-        b.firstChild.textContent = s.id;
+        b.innerHTML = `<div><span class="sid"></span> <span class="badge"></span></div><div class="meta"></div>`;
+        b.querySelector('.sid').textContent = s.id;
+        const badge = b.querySelector('.badge');
+        badge.textContent = s.simulated ? 'SIMULATED' : `REAL${s.device && s.device !== 'unknown' ? ' · ' + s.device : ''}`;
+        badge.classList.add(s.simulated ? 'sim' : 'real');
         b.lastChild.textContent = `${s.continues ? '↪ ' + s.continues + ' · ' : ''}${s.frames} frames · ${s.points} pts · ${s.created ? new Date(s.created).toLocaleString() : ''}`;
         b.onclick = () => loadFromServer(s.id);
         return b;
@@ -93,8 +96,15 @@ function setScan(name, text) {
 }
 
 // keepView: re-render in place (used while nudging a chain) instead of resetting route + camera.
+const isSimulated = (h) => !!h && (h.simulated || h.device === 'synthetic');
+
 function setParsed(name, parsed, { keepView = false } = {}) {
   $('err').textContent = '';
+  const chip = $('dataKind');
+  const sim = isSimulated(parsed.header);
+  chip.hidden = !parsed.header;
+  chip.textContent = sim ? 'SIMULATED DATA' : `REAL SCAN${parsed.header?.device && parsed.header.device !== 'unknown' ? ' · ' + parsed.header.device : ''}`;
+  chip.className = sim ? 'sim' : 'real';
   if (!parsed.frames.length) {
     $('err').textContent = `${name}: no frames found${parsed.header ? '' : ' (and no header)'}`;
     return;
@@ -143,13 +153,16 @@ function setupChain(id, text) {
 }
 
 async function combineChain({ keepView = false } = {}) {
-  if (!chain) return;
-  for (const cid of chain.ids) {
-    if (chain.texts.has(cid)) continue;
+  const c = chain;
+  if (!c) return;
+  for (const cid of c.ids) {
+    if (c.texts.has(cid)) continue;
     const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(cid)}`);
     if (!res.ok) throw new Error(`${cid}: ${res.status}`);
-    chain.texts.set(cid, await res.text());
+    c.texts.set(cid, await res.text());
+    if (chain !== c) return; // another scan was opened while this chain loaded
   }
+  if (chain !== c || !$('combine').checked) return;
   const parsed = chain.ids.map((cid) => parseScan(chain.texts.get(cid)));
   // Nudges saved in the scan files (continues_nudge) are the defaults; this browser's slider tweaks win.
   const fileNudges = Object.fromEntries(parsed.filter((p) => p.header?.continues_nudge).map((p) => [p.header.session_id, p.header.continues_nudge]));
@@ -220,9 +233,8 @@ function applyProfile() {
 function rebuild() {
   if (!scan) return;
   grid = buildGrid(scan.frames, opts());
-  gridImage = grid ? renderGridImage(grid) : null;
   trav = grid ? traversability(grid) : null;
-  travImage = trav ? renderTravImage(grid, trav) : null;
+  gridImage = travImage = null; // 2D debug images are built on demand (drawDebug), not in Map mode
   if (view3d && grid) view3d.setMap(grid, trav);
   computeRoute();
   renderStats();
@@ -433,6 +445,8 @@ function addRoutePoint(pt) {
 }
 
 function drawDebug(r) {
+  if ($('mapMode').value === 'trav') travImage ??= trav && renderTravImage(grid, trav);
+  else gridImage ??= grid && renderGridImage(grid);
   const layerImage = $('mapMode').value === 'trav' ? travImage : gridImage;
   if ($('showGrid').checked && layerImage) {
     ctx.imageSmoothingEnabled = false;
@@ -802,8 +816,7 @@ $('profile').addEventListener('change', () => {
 });
 window.addEventListener('resize', resize);
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  if (grid) gridImage = renderGridImage(grid);
-  if (trav) travImage = renderTravImage(grid, trav);
+  gridImage = travImage = null; // rebuilt in the new colours on the next debug draw
   if (view3d) {
     view3d.applyTheme();
     if (grid) view3d.setMap(grid, trav);

@@ -56,6 +56,7 @@ export class View3D {
   }
 
   applyTheme() {
+    this.themeVersion = (this.themeVersion || 0) + 1; // built map groups use theme colours: rebuild
     this.scene.background = new THREE.Color(this.color('--map-unknown'));
     this.render();
   }
@@ -103,10 +104,32 @@ export class View3D {
     this.floorPlan = on;
   }
 
+  // Builds (or reuses) the map for the current mode. Both the normal and the floor-plan version are
+  // kept once built, so toggling floor plan just swaps which one is shown.
   setMap(grid, trav) {
-    this.clear(this.mapGroup);
-    const { w, h, cell, minX, minZ } = grid;
+    const key = this.floorPlan ? 'plan' : 'normal';
+    if (this.built?.trav !== trav || this.built?.theme !== this.themeVersion) {
+      for (const g of [this.built?.plan, this.built?.normal]) if (g) this.clear(g);
+      this.built = { trav, theme: this.themeVersion };
+    }
     this.grid = grid;
+    if (!this.built[key]) this.built[key] = this.buildMap(grid, trav);
+    this.mapGroup.remove(...this.mapGroup.children); // detach only: built groups are reused
+    this.mapGroup.add(this.built[key]);
+    this.blockCount = this.built[key].userData.blockCount;
+    this.render();
+    // Pre-build the other version while the browser is idle, so the first toggle is instant too.
+    const other = this.floorPlan ? 'normal' : 'plan';
+    const built = this.built;
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300));
+    idle(() => {
+      if (this.built === built && !built[other]) built[other] = this.buildMap(grid, trav);
+    });
+  }
+
+  buildMap(grid, trav) {
+    const group = new THREE.Group();
+    const { w, h, cell, minX, minZ } = grid;
 
     // Floor: one texel per cell, unknown transparent, walked tinted.
     const tex = document.createElement('canvas');
@@ -116,7 +139,11 @@ export class View3D {
     const img = tctx.createImageData(w, h);
     const floorRGB = rgb(this.color('--map-floor'));
     const walkRGB = rgb(this.color('--map-road'));
-    const known = close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2);
+    // Cleaned masks depend only on (grid, trav): cache them so toggling floor plan / theme doesn't
+    // redo the clean-up on a multi-million-cell venue grid.
+    if (this.cache?.trav !== trav) this.cache = { trav };
+    const cached = (key, make) => (this.cache[key] ??= make());
+    const known = cached('known', () => close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2));
     for (let i = 0; i < w * h; i++) {
       if (!known[i]) continue;
       img.data.set(trav.tier[i] === TRAV.WALKED && !this.floorPlan ? walkRGB : floorRGB, i * 4);
@@ -133,11 +160,12 @@ export class View3D {
     floor.rotation.x = -Math.PI / 2; // plane's +Y (texture top) -> -Z, so texture row 0 = minZ
     floor.position.set(minX + (w * cell) / 2, 0, minZ + (h * cell) / 2);
     floor.receiveShadow = true;
-    this.mapGroup.add(floor);
+    group.add(floor);
 
     // Blocks: obstacle mask cleaned up, then one box per BLOCK x BLOCK group of cells.
-    const source = this.floorPlan ? wallMask(grid, trav.occ) : Uint8Array.from(trav.occ);
-    const mask = dropSpecks(close(source, w, h, 3), w, h, MIN_OBSTACLE_CELLS);
+    const mask = this.floorPlan
+      ? cached('walls', () => dropSpecks(close(wallMask(grid, trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS))
+      : cached('obstacles', () => dropSpecks(close(Uint8Array.from(trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS));
     const blocks = [];
     for (let bz = 0; bz < h; bz += BLOCK) {
       for (let bx = 0; bx < w; bx += BLOCK) {
@@ -200,7 +228,7 @@ export class View3D {
       mesh.setMatrixAt(k, m);
       mesh.setColorAt(k, c.copy(low).lerp(high, Math.min(1, hgt / 2)));
     });
-    this.mapGroup.add(mesh);
+    group.add(mesh);
 
     // Start marker: flat ring at the origin.
     const ring = new THREE.Mesh(
@@ -209,7 +237,7 @@ export class View3D {
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.01;
-    this.mapGroup.add(ring);
+    group.add(ring);
 
     // Sun + shadow camera cover the map.
     const cx = minX + (w * cell) / 2, cz = minZ + (h * cell) / 2, span = Math.max(w, h) * cell;
@@ -221,8 +249,8 @@ export class View3D {
     sc.near = 0.1;
     sc.far = span * 3;
     sc.updateProjectionMatrix();
-    this.blockCount = blocks.length;
-    this.render();
+    group.userData.blockCount = blocks.length;
+    return group;
   }
 
   // labels: [{ name, p: [x, y, z] }]. A name tag on a thin post at each spot, always readable.
@@ -300,6 +328,13 @@ export class View3D {
     const span = Math.max((w * cell) / this.camera.aspect, h * cell, 2);
     const dist = (span / 2 / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.15;
     const tilt = THREE.MathUtils.degToRad(35); // from vertical: steep enough to see over walls
+    // Clipping range sized to the map: a fixed 200 m far plane cut off the far end of a tilted
+    // ~110 m venue chain. Zoom-out is capped so the far plane always covers the whole map.
+    const diag = Math.hypot(w * cell, h * cell);
+    this.controls.maxDistance = Math.max(dist * 3, 20);
+    this.camera.far = this.controls.maxDistance + diag + 10;
+    this.camera.near = Math.max(0.02, dist / 4000);
+    this.camera.updateProjectionMatrix();
     this.controls.target.set(cx, 0, cz);
     this.camera.position.set(cx, dist * Math.cos(tilt), cz + dist * Math.sin(tilt));
     this.controls.update();

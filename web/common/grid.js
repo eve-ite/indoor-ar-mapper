@@ -6,7 +6,7 @@ export const DEFAULTS = {
   floorMax: 0.1, // hits less than this above the tracked floor are floor -> free
   wallMin: 0.2, // hits in [wallMin, wallMax] above the floor are walls/obstacles -> occupied
   wallMax: 2.0,
-  maxRange: 6.0, // ignore hits farther than this from the phone (m, in X/Z)
+  maxRange: 9.0, // ignore hits farther than this from the phone (m, in X/Z); depth samples reach 8 m
   clearBelow: 0.5, // a ray only fully clears a cell where it passes below this height (tables, chairs)
   overheadFree: 0, // free weight where the ray passes above clearBelow: it proves nothing about what is under it
   lFree: -0.4,

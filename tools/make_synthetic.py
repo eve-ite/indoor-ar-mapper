@@ -51,15 +51,18 @@ def ray_box_enter(o, d, lo, hi):
 
 
 def depth_samples(o, yaw, rng):
-    """Depth-map samples: a 16 x 5 grid over ~60 x 45 deg below the horizon, 2% range noise."""
+    """Depth-map samples: a 16-column grid over ~60 deg, rows below the horizon, 2% range noise.
+    --depth-max (default 5 m, the old app) and --rows-up (the app's extra row just above centre)."""
     out = []
-    for p_deg in (-5, -14, -23, -32, -41):
+    max_range = float(arg("--depth-max", 5))
+    rows = ((3,) if "--rows-up" in sys.argv else ()) + (-5, -14, -23, -32, -41)
+    for p_deg in rows:
         for i in range(16):
             a = yaw + math.radians(-30 + 60 * i / 15)
             b = math.radians(p_deg)
             d = (-math.sin(a) * math.cos(b), math.sin(b), -math.cos(a) * math.cos(b))
             tt = min(ray_box_exit(o, d, *ROOM), ray_box_enter(o, d, *TABLE))
-            if not 0.3 < tt < 5:
+            if not 0.3 < tt < max_range:
                 continue
             tt *= 1 + rng.gauss(0, DEPTH_NOISE)
             out.append([round(o[k] + d[k] * tt, 3) for k in range(3)])
@@ -71,6 +74,10 @@ def arg(name, default=None):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 
 
+if arg("--room"):  # --room x0,z0,x1,z1 (2.5 m high), e.g. a wide hallway
+    rx0, rz0, rx1, rz1 = map(float, arg("--room").split(","))
+    ROOM = ((rx0, 0.0, rz0), (rx1, 2.5, rz1))
+
 if arg("--table"):  # --table x0,z0,x1,z1 (height stays 0.75 m)
     x0, z0, x1, z1 = map(float, arg("--table").split(","))
     TABLE = ((x0, 0.0, z0), (x1, 0.75, z1))
@@ -81,6 +88,8 @@ SHORT_LOOP = [(0, 0), (0, -1.3), (0.9, -1.0), (0.6, -0.3), (0, 0)]
 def waypoints():
     if arg("--path") == "short":
         return SHORT_LOOP
+    if arg("--path") == "hall":  # straight down the middle, no looking around needed
+        return [(0, 0), (0, -18)]
     # loop around the table, starting at the origin facing -Z
     return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.7, -3.2), (1.7, -1.8), (0.8, -0.5), (0, 0)]
 
@@ -95,6 +104,7 @@ def main():
             "type": "header",
             "session_id": arg("--id") or ("synthetic_depth" if depth else "synthetic"),
             "device": "synthetic",
+            "simulated": True,
             "ref_space": "local-floor",
             "start_marker": {"p": [0, 0, 0], "q": [0, 0, 0, 1]},
             "created": "2026-10-24T10:00:00Z",

@@ -45,6 +45,8 @@ def summarize(path: Path) -> dict:
         "created": (header or {}).get("created"),
         "device": (header or {}).get("device"),
         # scan chaining: this scan started where `continues` ended (same floor mark)
+        # simulated = made by tools/make_synthetic.py (device "synthetic"), not a phone
+        "simulated": bool((header or {}).get("simulated")) or (header or {}).get("device") == "synthetic",
         "continues": (header or {}).get("continues"),
         "chain": (header or {}).get("chain"),
         "frames": frames,
