@@ -1,9 +1,10 @@
 // 2D log-odds occupancy grid on the X/Z plane (WebXR local-floor, Y up).
+import { FloorTracker } from '../common/floor.js';
 
 export const DEFAULTS = {
   cell: 0.05, // m; >= ARCore pose noise, <= half the smallest gap that matters
-  floorMax: 0.15, // hits with y below this are floor -> free
-  wallMin: 0.2, // hits with y in [wallMin, wallMax] are walls/obstacles -> occupied
+  floorMax: 0.1, // hits less than this above the tracked floor are floor -> free
+  wallMin: 0.2, // hits in [wallMin, wallMax] above the floor are walls/obstacles -> occupied
   wallMax: 2.0,
   maxRange: 6.0, // ignore hits farther than this from the phone (m, in X/Z)
   clearBelow: 0.5, // a ray only fully clears a cell where it passes below this height (tables, chairs)
@@ -63,31 +64,43 @@ export function buildGrid(frames, opts = {}) {
     }
   };
 
+  // All heights below are relative to the tracked floor, not local-floor's y=0.
+  const floors = floorPerFrame(frames);
   const counts = { floor: 0, wall: 0, ignored: 0 };
-  for (const f of frames) {
+  frames.forEach((f, i) => {
+    const floor = floors[i];
+    const phoneH = f.p[1] - floor;
     const [px, pz] = toCell(f.p[0], f.p[2]);
     bump(px, pz, o.lFree); // the phone/car was physically here
     for (const hit of f.pts || []) {
       const [hx, hy, hz] = hit;
+      const hitH = hy - floor;
       if (Math.hypot(hx - f.p[0], hz - f.p[2]) > o.maxRange) { counts.ignored++; continue; }
       const [cx, cz] = toCell(hx, hz);
-      if (hy < o.floorMax) {
-        traceFree(px, pz, f.p[1], cx, cz, hy);
+      const cls = classifyHeight(hitH, o);
+      if (cls === 'floor') {
+        traceFree(px, pz, phoneH, cx, cz, hitH);
         bump(cx, cz, o.lFree);
         counts.floor++;
-      } else if (hy >= o.wallMin && hy <= o.wallMax) {
-        traceFree(px, pz, f.p[1], cx, cz, hy);
+      } else if (cls === 'wall') {
+        traceFree(px, pz, phoneH, cx, cz, hitH);
         bump(cx, cz, o.lOcc);
         counts.wall++;
       } else {
         counts.ignored++; // ceiling / between floor and wall band
       }
     }
-  }
+  });
 
-  return { w, h, minX, minZ, cell: o.cell, L, counts, opts: o };
+  return { w, h, minX, minZ, cell: o.cell, L, counts, floors, opts: o };
 }
 
+export function floorPerFrame(frames) {
+  const tracker = new FloorTracker();
+  return frames.map((f) => tracker.update(f.p[1], f.pts || []));
+}
+
+// y is height above the tracked floor.
 export function classifyHeight(y, o) {
   if (y < o.floorMax) return 'floor';
   if (y >= o.wallMin && y <= o.wallMax) return 'wall';

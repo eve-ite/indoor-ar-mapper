@@ -147,7 +147,11 @@ function renderStats() {
       `grid      ${grid.w}×${grid.h} @ ${grid.cell * 100} cm`,
       `extent    ${(grid.w * grid.cell).toFixed(1)} × ${(grid.h * grid.cell).toFixed(1)} m`,
       `hits      floor ${c.floor}  wall ${c.wall}  ignored ${c.ignored}`,
+      `floor y   ${Math.min(...grid.floors).toFixed(2)} .. ${Math.max(...grid.floors).toFixed(2)} m (tracked)`,
     );
+    if (c.floor + c.wall && c.wall / (c.floor + c.wall) < 0.05) {
+      lines.push('', '⚠ almost no wall hits: phone tilted down,', '  or ARCore found no wall planes');
+    }
   }
   $('stats').textContent = lines.join('\n');
 }
@@ -193,9 +197,10 @@ function draw() {
     for (const cls of ['other', 'floor', 'wall']) {
       ctx.fillStyle = POINT_COLORS[cls];
       ctx.globalAlpha = cls === 'wall' ? 0.8 : 0.45;
-      for (const f of scan.frames) {
+      for (const [i, f] of scan.frames.entries()) {
+        const floor = grid ? grid.floors[i] : 0;
         for (const h of f.pts || []) {
-          if (classifyHeight(h[1], o) !== cls) continue;
+          if (classifyHeight(h[1] - floor, o) !== cls) continue;
           ctx.fillRect(sx(h[0]) - size / 2, sy(h[2]) - size / 2, size, size);
         }
       }

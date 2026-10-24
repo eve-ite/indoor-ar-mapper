@@ -35,6 +35,17 @@
       font: 15px/1.5 ui-monospace, Menlo, Consolas, monospace;
       white-space: pre-wrap;
     }
+    #hint {
+      border-radius: 12px;
+      padding: 14px;
+      font: 700 22px/1.3 system-ui, sans-serif;
+      text-align: center;
+      background: rgba(0, 0, 0, 0.6);
+    }
+    #hint.ok { color: var(--accent); }
+    #hint.warn { color: var(--warn); }
+    #hint.bad { color: var(--bad); }
+    #hint small { display: block; font-weight: 400; font-size: 15px; color: var(--fg); margin-top: 4px; }
     #msg { color: var(--muted); }
     #msg.warn { color: var(--warn); }
     #msg.bad { color: var(--bad); }
@@ -71,6 +82,7 @@
   <div id="overlay">
     <h1>Indoor AR Mapper · scan</h1>
     <div id="status">checking device…</div>
+    <div id="hint" hidden></div>
     <p id="msg"></p>
     <div class="buttons">
       <button id="start" class="primary wide" disabled>Start scan</button>
@@ -79,9 +91,12 @@
       <button id="upload" class="hide-in-ar" disabled>Upload</button>
     </div>
     <p class="tip hide-in-ar">
-      Stand on the start marker facing the agreed direction, then tap Start.
-      Move slowly and sideways a bit so walls get detected. Scans save on the phone as you go;
-      upload whenever the network cooperates.
+      <b>Before Start:</b> stand over the corner of the tape L, phone <b>upright</b> (camera looking
+      straight ahead, not at the floor), top edge pointing along the long arm. The map's origin and
+      "forward" are wherever the phone is when you tap Start.<br />
+      <b>While scanning:</b> walk slowly along the walls with the phone angled toward them, turn in
+      curves rather than spinning on the spot, and follow the hint at the top. Scans save on the
+      phone as you go; upload whenever the network cooperates.
     </p>
     <div class="hide-in-ar">
       <h2 class="tip">Saved on this phone</h2>

@@ -1,6 +1,7 @@
 // M1 scan app: WebXR immersive-ar + local-floor + hit-test "fake lidar", recorded to JSON Lines.
 import * as THREE from '../vendor/three.module.min.js';
 import { APP_VERSION, r3, toLine } from '../common/jsonl.js';
+import { FloorTracker } from '../common/floor.js';
 import * as store from './store.js';
 
 // ---- config ----
@@ -10,15 +11,20 @@ const FAN_HALF_ANGLE_DEG = 35; // ~camera FOV; wider rays only hit planes seen e
 const FAN_YAW_STEPS = 7;
 const FAN_PITCHES_DEG = [0, -25];
 const MAX_VIS_POINTS = 4000;
+const HINT_WINDOW_S = 3;
+const WALL_MIN_ABOVE_FLOOR = 0.2; // m; matches the viewer's default wall band
+const PITCH_LIMIT_DEG = 12; // nag if the camera points further up/down than this
+const MAX_SPEED = 0.6; // m/s
 
 const params = new URLSearchParams(location.search);
 // Optional upload base URL for when the pages are hosted separately from the server.
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
-const DEVICE = params.get('device') || guessDevice();
+let DEVICE = params.get('device') || 'unknown';
 
 const $ = (id) => document.getElementById(id);
 const ui = {
   status: $('status'),
+  hint: $('hint'),
   msg: $('msg'),
   start: $('start'),
   stop: $('stop'),
@@ -27,9 +33,14 @@ const ui = {
   saved: $('saved'),
 };
 
-function guessDevice() {
+// Chrome's reduced UA string says "K" for every Android model; Client Hints have the real one.
+async function guessDevice() {
+  try {
+    const { model } = await navigator.userAgentData.getHighEntropyValues(['model']);
+    if (model) return model;
+  } catch {}
   const m = navigator.userAgent.match(/Android [\d.]+; ([^;)]+)/);
-  return m ? m[1].trim() : 'unknown';
+  return m && m[1].trim() !== 'K' ? m[1].trim() : 'unknown';
 }
 
 function say(text, kind = '') {
@@ -186,7 +197,10 @@ async function startScan() {
     t0: null,
     lastT: 0,
     lastRecT: -Infinity,
+    floor: new FloorTracker(),
+    recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
   };
+  showHint('warn', 'Move side to side ↔', 'Let ARCore find the floor before walking off');
   visCount = visHead = 0;
   visGeom.setDrawRange(0, 0);
   await store.startSession(header, headerLine);
@@ -206,6 +220,7 @@ function onXRFrame(time, frame) {
   const pose = frame.getViewerPose(refSpace);
   if (!pose) {
     trackingState = 'lost';
+    showHint('bad', 'Tracking lost', 'Go slowly back to where you just were and point at something textured');
     renderStatus();
     return;
   }
@@ -229,6 +244,12 @@ function onXRFrame(time, frame) {
   });
   rec.rayTries += hitSources.length;
 
+  const floorY = rec.floor.update(pos.y, pts);
+  const walls = pts.filter((h) => h[1] - floorY >= WALL_MIN_ABOVE_FLOOR).length;
+  rec.recent.push({ t, x: pos.x, z: pos.z, hits: pts.length, walls });
+  while (rec.recent.length && rec.recent[0].t < t - HINT_WINDOW_S) rec.recent.shift();
+  updateHint(ori);
+
   const line = toLine({
     type: 'frame',
     t: r3(t),
@@ -245,6 +266,43 @@ function onXRFrame(time, frame) {
 
   if (rec.pendingFrames >= FLUSH_EVERY_FRAMES) flush();
   renderStatus();
+}
+
+// ---- live hint: one instruction at a time, most urgent first ----
+function showHint(kind, text, detail = '') {
+  ui.hint.hidden = false;
+  ui.hint.className = kind;
+  ui.hint.innerHTML = '';
+  ui.hint.append(text);
+  if (detail) {
+    const s = document.createElement('small');
+    s.textContent = detail;
+    ui.hint.append(s);
+  }
+}
+
+// Camera pitch in degrees: viewer forward (0,0,-1) rotated by q; negative = looking down.
+function pitchDeg({ x, y, z, w }) {
+  const fy = -2 * (y * z - w * x);
+  return THREE.MathUtils.radToDeg(Math.asin(Math.max(-1, Math.min(1, fy))));
+}
+
+function updateHint(ori) {
+  const r = rec.recent;
+  const span = r.length > 1 ? r.at(-1).t - r[0].t : 0;
+  const hits = r.reduce((n, f) => n + f.hits, 0);
+  const walls = r.reduce((n, f) => n + f.walls, 0);
+  const speed = span > 0.5 ? Math.hypot(r.at(-1).x - r[0].x, r.at(-1).z - r[0].z) / span : 0;
+  const pitch = pitchDeg(ori);
+
+  if (trackingState === 'limited') return showHint('bad', 'Tracking shaky', 'Slow down, more light, aim at textured things');
+  if (pitch < -PITCH_LIMIT_DEG) return showHint('warn', 'Tilt the phone up ↑', 'Camera straight ahead, not at the floor, so the rays reach the walls');
+  if (pitch > PITCH_LIMIT_DEG) return showHint('warn', 'Tilt the phone down a bit ↓', 'Camera straight ahead');
+  if (span < 1) return; // keep the startup hint until we have a window to judge
+  if (!hits) return showHint('warn', 'Move side to side ↔', 'ARCore needs to see things shift to find surfaces');
+  if (speed > MAX_SPEED) return showHint('warn', 'Slow down', `${speed.toFixed(1)} m/s, aim for under ${MAX_SPEED}`);
+  if (!walls) return showHint('warn', 'Find the walls: step sideways ↔', 'Walk along a wall with the phone angled toward it');
+  showHint('ok', 'Looking good ✓', `${walls} wall hits in the last ${HINT_WINDOW_S} s, keep it slow`);
 }
 
 function flush() {
@@ -268,6 +326,7 @@ async function onSessionEnd() {
   hitSources = [];
   session = null;
   document.body.classList.remove('in-ar');
+  ui.hint.hidden = true;
   ui.stop.hidden = true;
   ui.start.hidden = false;
   ui.start.disabled = false;
@@ -393,6 +452,7 @@ async function init() {
     say('AR sessions are not supported here. Needs Chrome on an ARCore phone.', 'bad');
     return;
   }
+  if (!params.get('device')) DEVICE = await guessDevice();
   ui.start.disabled = false;
   renderStatus();
 }
