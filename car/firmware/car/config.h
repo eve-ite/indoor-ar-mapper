@@ -65,5 +65,15 @@
 #define TELEMETRY_HZ 10
 #define NET_CORE 0            // WiFi/WebSocket/JSON task runs here; loop() (steppers) runs on core 1
 
-// ---- Server path (host/port/TLS come from secrets.h, overridable over serial) ----
+// ---- Control link ----
+// BLE (primary): the car is a Nordic-UART-style BLE peripheral; the teleop page connects to it
+// directly with Web Bluetooth. No wifi, no server, no hotspot needed.
+// WIFI (secondary): WebSocket client to the server (/car), host/port/TLS from secrets.h.
+#define LINK_BLE 1
+#define LINK_WIFI 2
+#define CONTROL_LINK LINK_BLE
+#define BLE_NAME "mapper-car"
+#define LOG_DRIVE_COMMANDS true  // print every received drive command on serial (115200)
+
+// ---- Server path for WIFI mode (host/port/TLS come from secrets.h, overridable over serial) ----
 #define SERVER_PATH "/car"

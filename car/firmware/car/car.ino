@@ -1,19 +1,26 @@
-// Indoor AR Mapper car firmware (M3): WebSocket-driven differential stepper car.
-// Board: ESP32-S3 (N16R8). Libraries: AccelStepper, WebSockets (Links2004), ArduinoJson 7.
-// Pins and tunables: config.h. WiFi/server: secrets.h (copy secrets.example.h).
+// Indoor AR Mapper car firmware (M3): differential stepper car driven by JSON commands.
+// Board: ESP32-S3 (N16R8). Libraries: AccelStepper, ArduinoJson 7, WebSockets (Links2004, WIFI mode).
+// Pins and tunables: config.h (wiring source of truth: car/WIRING.md). WiFi/server: secrets.h.
 //
-// Two cores, so networking can never make the steppers stutter:
+// Control link (config.h CONTROL_LINK):
+//   LINK_BLE  (primary)   BLE peripheral "mapper-car", Nordic-UART-style service (ble_link.h);
+//                         the teleop page connects directly with Web Bluetooth.
+//   LINK_WIFI (secondary) WebSocket client to the server's /car (wss:// tunnel or ws:// LAN).
+// Same JSON messages either way; over BLE each is a '\n'-terminated line, chunked to the MTU.
+//
+// Two cores, so the radio can never make the steppers stutter:
 //   core 1, loop():   steppers (runSpeed every pass), ultrasonic, IR, deadman, safety. No delay().
-//   core 0, netTask:  WiFi, WebSocket client (wss:// to the tunnel or ws:// on a LAN),
-//                     JSON in/out, 10 Hz telemetry, MPU6050, serial config.
+//   core 0, netTask:  BLE or WiFi/WebSocket, JSON in/out, 10 Hz telemetry, MPU6050, serial
+//                     config and logging.
 // They share two small structs under a spinlock.
 //
-// Protocol (see server/car_relay.py):
+// Protocol:
 //   in   {"type":"drive","v":-1..1,"w":-1..1,"seq":n}      v forward +, w turn left +
 //   out  {"type":"telemetry","dist_cm","ir_blocked","left_steps","right_steps",
 //         "yaw_rate","rssi","uptime_ms","blocked","seq"}
 // Safety: no command for DEADMAN_MS -> stop + coils off; link loss -> immediate stop;
-// forward refused under BLOCK_DIST_M (with hysteresis); reverse and turning always allowed.
+// forward refused under BLOCK_DIST_M (with hysteresis) or with no ultrasonic reading;
+// reverse and turning always allowed.
 
 #include <AccelStepper.h>
 #include <ArduinoJson.h>
@@ -22,6 +29,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 
+#include "ble_link.h"
 #include "config.h"
 #include "secrets.h"
 
@@ -32,16 +40,22 @@ struct Command {
   uint32_t seq = 0;
   bool fresh = false;  // false until the first command after (re)connecting
 };
+enum StopReason : uint8_t { STOP_NONE, STOP_COMMAND, STOP_DEADMAN, STOP_LINK, STOP_BLOCKED };
 struct Sensors {
   float dist_m = NAN;  // NAN = no valid reading
   bool ir = false;
   bool blocked = false;
+  bool moving = false;
   int32_t left_steps = 0, right_steps = 0;  // + = forward on both sides
+  uint32_t stops = 0;                       // increments on every moving -> stopped transition
+  StopReason stopReason = STOP_NONE;
+  uint32_t stopMs = 0, stopCmdMs = 0;  // when it stopped, and when the last command had arrived
 };
 static portMUX_TYPE shareMux = portMUX_INITIALIZER_UNLOCKED;
 static Command sharedCmd;
 static Sensors sharedSensors;
 static volatile bool linkUp = false;
+static BleLink ble;
 
 void startNetwork();
 
@@ -51,6 +65,7 @@ static AccelStepper leftMotor(AccelStepper::HALF4WIRE, LEFT_IN1, LEFT_IN3, LEFT_
 static AccelStepper rightMotor(AccelStepper::HALF4WIRE, RIGHT_IN1, RIGHT_IN3, RIGHT_IN2, RIGHT_IN4);
 static float leftRate = 0, rightRate = 0;  // current step rates, + = forward
 static bool coilsOn = false;
+static bool wasMoving = false;
 
 // Ultrasonic, interrupt-timed so loop() never waits for the echo.
 static volatile uint32_t echoRiseUs = 0, echoPulseUs = 0;
@@ -124,6 +139,9 @@ void setup() {
   coilsOn = true;  // AccelStepper starts with outputs enabled; turn them off until we drive
   setCoils(false);
 
+  // BLE is set up here (core 1), like the working echo sketch, not inside the network task:
+  // started from core 0 the car advertised with no UART service in its GATT table.
+  if (CONTROL_LINK == LINK_BLE) ble.begin(BLE_NAME);
   startNetwork();
 }
 
@@ -143,8 +161,10 @@ void loop() {
   portEXIT_CRITICAL(&shareMux);
 
   // Deadman and link loss: zero the command.
+  bool link = linkUp && cmd.fresh;
+  bool expired = nowMs - cmd.ms > DEADMAN_MS;
   float v = cmd.v, w = cmd.w;
-  if (!linkUp || !cmd.fresh || nowMs - cmd.ms > DEADMAN_MS) v = w = 0;
+  if (!link || expired) v = w = 0;
 
   // Forward safety stop with hysteresis (otherwise a reading hovering at the threshold lets the
   // car creep forward on every "clear" sample).
@@ -178,9 +198,17 @@ void loop() {
   sharedSensors.dist_m = distM;
   sharedSensors.ir = ir;
   sharedSensors.blocked = blocked;
+  sharedSensors.moving = moving;
   sharedSensors.left_steps = LEFT_DIR * leftMotor.currentPosition();
   sharedSensors.right_steps = RIGHT_DIR * rightMotor.currentPosition();
+  if (wasMoving && !moving) {  // record why we stopped; the network core logs it
+    sharedSensors.stops++;
+    sharedSensors.stopReason = !link ? STOP_LINK : expired ? STOP_DEADMAN : blocked ? STOP_BLOCKED : STOP_COMMAND;
+    sharedSensors.stopMs = nowMs;
+    sharedSensors.stopCmdMs = cmd.ms;
+  }
   portEXIT_CRITICAL(&shareMux);
+  wasMoving = moving;
 }
 
 // ---------------------------------------------------------------- core 0: network
@@ -198,33 +226,40 @@ static void stopCommand() {
   portEXIT_CRITICAL(&shareMux);
 }
 
+// One JSON message from either link.
+static void handleMessage(const char* text, size_t length) {
+  JsonDocument doc;
+  if (deserializeJson(doc, text, length)) return;
+  if (doc["type"] != "drive") return;
+  float v = constrain(doc["v"] | 0.0f, -1.0f, 1.0f);
+  float w = constrain(doc["w"] | 0.0f, -1.0f, 1.0f);
+  if (isnan(v) || isnan(w)) v = w = 0;
+  uint32_t seq = doc["seq"] | 0;
+  uint32_t now = millis();
+  portENTER_CRITICAL(&shareMux);
+  sharedCmd.v = v;
+  sharedCmd.w = w;
+  sharedCmd.seq = seq;
+  sharedCmd.ms = now;
+  sharedCmd.fresh = true;
+  portEXIT_CRITICAL(&shareMux);
+  if (LOG_DRIVE_COMMANDS) Serial.printf("%8lu [drive] seq=%lu v=%+.2f w=%+.2f\n", (unsigned long)now, (unsigned long)seq, v, w);
+}
+
 static void onWsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
       linkUp = true;
-      Serial.printf("[ws] connected to %s\n", cfgHost.c_str());
+      Serial.printf("%8lu [ws] connected to %s\n", millis(), cfgHost.c_str());
       break;
     case WStype_DISCONNECTED:
       linkUp = false;  // loop() stops on the next pass
       stopCommand();
-      Serial.println("[ws] disconnected");
+      Serial.printf("%8lu [ws] disconnected\n", millis());
       break;
-    case WStype_TEXT: {
-      JsonDocument doc;
-      if (deserializeJson(doc, payload, length)) return;
-      if (doc["type"] != "drive") return;
-      float v = constrain(doc["v"] | 0.0f, -1.0f, 1.0f);
-      float w = constrain(doc["w"] | 0.0f, -1.0f, 1.0f);
-      if (isnan(v) || isnan(w)) v = w = 0;
-      portENTER_CRITICAL(&shareMux);
-      sharedCmd.v = v;
-      sharedCmd.w = w;
-      sharedCmd.seq = doc["seq"] | 0;
-      sharedCmd.ms = millis();
-      sharedCmd.fresh = true;
-      portEXIT_CRITICAL(&shareMux);
+    case WStype_TEXT:
+      handleMessage((const char*)payload, length);
       break;
-    }
     default:
       break;
   }
@@ -272,13 +307,42 @@ static void sendTelemetry() {
   float yaw = mpuOk ? mpuYawRate() : NAN;
   if (isnan(yaw)) doc["yaw_rate"] = nullptr;
   else doc["yaw_rate"] = yaw;
-  doc["rssi"] = WiFi.RSSI();
+  if (CONTROL_LINK == LINK_WIFI) doc["rssi"] = WiFi.RSSI();
+  else doc["rssi"] = nullptr;  // no cheap RSSI for a BLE peripheral connection
   doc["uptime_ms"] = millis();
   doc["blocked"] = s.blocked;
   doc["seq"] = seq;
   String out;
   serializeJson(doc, out);
-  ws.sendTXT(out);
+  if (CONTROL_LINK == LINK_BLE) ble.sendLine(out);
+  else ws.sendTXT(out);
+}
+
+static const char* reasonName(StopReason r) {
+  switch (r) {
+    case STOP_COMMAND: return "stop command";
+    case STOP_DEADMAN: return "DEADMAN (no command)";
+    case STOP_LINK: return "LINK LOST";
+    case STOP_BLOCKED: return "forward blocked";
+    default: return "?";
+  }
+}
+
+// Log motion state changes from the motor core (printed here so loop() never waits on serial).
+static void logStops() {
+  static uint32_t seenStops = 0;
+  static bool seenMoving = false;
+  Sensors s;
+  portENTER_CRITICAL(&shareMux);
+  s = sharedSensors;
+  portEXIT_CRITICAL(&shareMux);
+  if (s.moving && !seenMoving) Serial.printf("%8lu [motion] moving\n", millis());
+  seenMoving = s.moving;
+  if (s.stops != seenStops) {
+    seenStops = s.stops;
+    Serial.printf("%8lu [motion] stopped: %s, %lu ms after the last command\n", (unsigned long)s.stopMs,
+                  reasonName(s.stopReason), (unsigned long)(s.stopMs - s.stopCmdMs));
+  }
 }
 
 static void connectServer() {
@@ -304,7 +368,11 @@ static void loadConfig() {
 }
 
 static void printConfig() {
-  Serial.printf("wifi \"%s\"  server %s://%s:%u%s  link %s  wifi %s rssi %d\n", cfgSsid.c_str(), cfgTls ? "wss" : "ws",
+  if (CONTROL_LINK == LINK_BLE) {
+    Serial.printf("link BLE \"%s\"  central %s\n", BLE_NAME, ble.connected() ? "CONNECTED" : "none (advertising)");
+    return;
+  }
+  Serial.printf("link WIFI \"%s\"  server %s://%s:%u%s  ws %s  wifi %s rssi %d\n", cfgSsid.c_str(), cfgTls ? "wss" : "ws",
                 cfgHost.c_str(), cfgPort, SERVER_PATH, linkUp ? "UP" : "down",
                 WiFi.isConnected() ? WiFi.localIP().toString().c_str() : "down", WiFi.RSSI());
 }
@@ -316,58 +384,78 @@ static void handleSerialLine(String line) {
   String cmd = sp < 0 ? line : line.substring(0, sp);
   String arg = sp < 0 ? "" : line.substring(sp + 1);
   arg.trim();
+  bool wifi = CONTROL_LINK == LINK_WIFI;
   if (cmd == "host" && arg.length()) {
     cfgHost = arg;
     prefs.putString("host", arg);
-    connectServer();
+    if (wifi) connectServer();
   } else if (cmd == "port" && arg.length()) {
     cfgPort = arg.toInt();
     prefs.putUShort("port", cfgPort);
-    connectServer();
+    if (wifi) connectServer();
   } else if (cmd == "tls" && arg.length()) {
     cfgTls = arg.toInt() != 0;
     prefs.putBool("tls", cfgTls);
-    connectServer();
+    if (wifi) connectServer();
   } else if (cmd == "wifi" && arg.length()) {
     int s2 = arg.indexOf(' ');
     cfgSsid = s2 < 0 ? arg : arg.substring(0, s2);
     cfgPass = s2 < 0 ? "" : arg.substring(s2 + 1);
     prefs.putString("ssid", cfgSsid);
     prefs.putString("pass", cfgPass);
-    WiFi.disconnect();
-    WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+    if (wifi) {
+      WiFi.disconnect();
+      WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+    }
   } else if (cmd == "reset") {
     prefs.clear();
     ESP.restart();
   } else if (cmd == "reboot") {
     ESP.restart();
-  } else if (cmd == "show") {
-    printConfig();
-  } else {
-    Serial.println("commands: show | host <name> | port <n> | tls <0|1> | wifi <ssid> <pass> | reset | reboot");
+  } else if (cmd != "show") {
+    Serial.println("commands: show | host <name> | port <n> | tls <0|1> | wifi <ssid> <pass> | reset | reboot"
+                   "  (host/port/tls/wifi apply in WIFI mode)");
   }
   printConfig();
 }
 
 static void netTask(void*) {
   loadConfig();
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
   mpuOk = mpuInit();
   Serial.printf("[car] MPU6050 %s\n", mpuOk ? "found" : "not found (yaw_rate = null)");
-  connectServer();
+  if (CONTROL_LINK == LINK_BLE) {
+    Serial.printf("[car] BLE link, advertising as \"%s\"\n", BLE_NAME);
+  } else {
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(cfgSsid.c_str(), cfgPass.c_str());
+    connectServer();
+  }
   printConfig();
 
   String line;
   uint32_t lastTelemetry = 0;
+  bool bleWasUp = false;
   for (;;) {
-    ws.loop();  // may block during (re)connect / TLS handshake; only this core waits
+    if (CONTROL_LINK == LINK_BLE) {
+      bool up = ble.connected();
+      if (up != bleWasUp) {
+        bleWasUp = up;
+        if (!up) stopCommand();  // central gone: stop now, don't wait for the deadman
+        linkUp = up;
+        Serial.printf("%8lu [ble] central %s\n", millis(), up ? "connected" : "disconnected");
+      }
+      String msg;
+      while (ble.readLine(msg)) handleMessage(msg.c_str(), msg.length());
+    } else {
+      ws.loop();  // may block during (re)connect / TLS handshake; only this core waits
+    }
     uint32_t now = millis();
     if (linkUp && now - lastTelemetry >= 1000 / TELEMETRY_HZ) {
       lastTelemetry = now;
       sendTelemetry();
     }
+    logStops();
     while (Serial.available()) {
       char c = Serial.read();
       if (c == '\n' || c == '\r') {

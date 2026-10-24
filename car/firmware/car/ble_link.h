@@ -25,7 +25,9 @@ class BleLink : public BLEServerCallbacks, public BLECharacteristicCallbacks {
     server_->setCallbacks(this);
     BLEService* svc = server_->createService(NUS_SERVICE_UUID);
     tx_ = svc->createCharacteristic(NUS_TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
-    tx_->addDescriptor(new BLE2902());
+#if defined(CONFIG_BLUEDROID_ENABLED)
+    tx_->addDescriptor(new BLE2902());  // NimBLE (the S3 default) adds the CCCD by itself
+#endif
     BLECharacteristic* rx =
         svc->createCharacteristic(NUS_RX_UUID, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
     rx->setCallbacks(this);
@@ -82,7 +84,7 @@ class BleLink : public BLEServerCallbacks, public BLECharacteristicCallbacks {
     portENTER_CRITICAL(&mux_);
     rx_ = "";
     portEXIT_CRITICAL(&mux_);
-    connects_++;
+    connects_ = connects_ + 1;
     connected_ = true;
   }
 

@@ -1,7 +1,12 @@
-// Teleop: keyboard / touch joystick -> {"type":"drive","v","w","seq"} over /drive at ~20 Hz.
+// Teleop: keyboard / touch joystick -> {"type":"drive","v","w","seq"} at ~20 Hz.
 // v: forward +, w: turn left (counter-clockwise) +. Both -1..1.
+// Two links to the car:
+//   Bluetooth (primary): direct to the car with Web Bluetooth, no server involved.
+//   Server (secondary):  WebSocket /drive -> server relay -> car's WiFi WebSocket.
+// When Bluetooth is connected it carries the commands; otherwise the server link does.
 // Stops are sent on key release, blur, tab hidden and page hide; the car's own 300 ms deadman
-// covers anything that slips through (frozen tab, dropped network, dead server).
+// (and its stop-on-disconnect) covers anything that slips through.
+import { BleCar, bleSupported } from './ble.js';
 
 const SEND_HZ = 20;
 const TELEMETRY_STALE_MS = 1000;
@@ -51,9 +56,47 @@ function connect() {
   };
 }
 
+// ---- Bluetooth link ----
+const ble = new BleCar({
+  onLine: (line) => {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (msg.type === 'telemetry') {
+      lastTelemetry = performance.now();
+      renderTelemetry(msg);
+    }
+  },
+  onDisconnect: () => {
+    $('bleBtn').textContent = 'Connect Bluetooth';
+    renderPills();
+  },
+});
+
+$('bleBtn').addEventListener('click', async () => {
+  if (ble.connected) return ble.disconnect();
+  if (!bleSupported()) {
+    $('bleNote').textContent = 'No Web Bluetooth in this browser: use Chrome or Edge (Brave disables it).';
+    return;
+  }
+  $('bleNote').textContent = 'pick "mapper-car"…';
+  try {
+    await ble.connect();
+    $('bleBtn').textContent = 'Disconnect Bluetooth';
+    $('bleNote').textContent = '';
+  } catch (err) {
+    $('bleNote').textContent = `Bluetooth: ${err.message}`;
+  }
+  renderPills();
+});
+
 function send(v, w) {
-  if (ws?.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'drive', v: round(v), w: round(w), seq: ++seq }));
+  const line = JSON.stringify({ type: 'drive', v: round(v), w: round(w), seq: ++seq });
+  if (ble.connected) ble.send(line);
+  else if (ws?.readyState === WebSocket.OPEN) ws.send(line);
 }
 
 const round = (x) => Math.round(x * 1000) / 1000;
@@ -156,9 +199,11 @@ for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
 function renderPills() {
   $('srvPill').className = `pill ${serverUp ? 'ok' : ''}`;
   $('srvPill').textContent = serverUp ? 'server' : 'server offline';
-  const stale = carUp && performance.now() - lastTelemetry > TELEMETRY_STALE_MS;
-  $('carPill').className = `pill ${carUp ? (stale ? 'warn' : 'ok') : ''}`;
-  $('carPill').textContent = !carUp ? 'car offline' : stale ? 'car silent' : 'car';
+  const up = ble.connected || carUp;
+  const via = ble.connected ? 'Bluetooth' : 'wifi';
+  const stale = up && performance.now() - lastTelemetry > TELEMETRY_STALE_MS;
+  $('carPill').className = `pill ${up ? (stale ? 'warn' : 'ok') : ''}`;
+  $('carPill').textContent = !up ? 'car offline' : stale ? `car silent (${via})` : `car (${via})`;
 }
 setInterval(renderPills, 500);
 

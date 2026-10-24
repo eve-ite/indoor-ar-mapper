@@ -60,6 +60,16 @@
       box-shadow: 0 4px 14px rgba(214, 69, 69, 0.35);
     }
     #stop:active { transform: scale(0.98); }
+    .link { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    #bleBtn {
+      font: 600 16px system-ui, sans-serif;
+      padding: 12px 16px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+    }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
     .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
     .stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
@@ -123,6 +133,11 @@
     </div>
   </header>
 
+  <div class="link">
+    <button id="bleBtn">Connect Bluetooth</button>
+    <span id="bleNote" class="help"></span>
+  </div>
+
   <button id="stop">STOP</button>
 
   <div class="grid">
@@ -147,7 +162,9 @@
   </div>
 
   <p class="help">
-    WASD or arrow keys while this tab is focused (space = stop), or drag the joystick.
+    Connect Bluetooth (Chrome/Edge) to drive the car directly; without it, commands go through
+    the server to a car in WiFi mode. WASD or arrow keys while this tab is focused (space = stop),
+    or drag the joystick.
     Letting go, switching tabs or leaving the window sends a stop; the car also stops on its own
     if it hears nothing for 300 ms, and won't drive forward closer than 15 cm to something.
   </p>
