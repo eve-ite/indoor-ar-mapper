@@ -1,7 +1,8 @@
 // M2 map viewer: loads a scan JSONL (server list or local file) and draws grid + points + trajectory.
 import { parseScan } from '../common/jsonl.js';
 import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
-import { TRAV, astar, traversability } from '../common/trav.js';
+import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
+import { buildMapLayers, chaikin, drawCompass, drawOrigin, drawPin } from './mapstyle.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -20,6 +21,8 @@ let grid = null;
 let gridImage = null;
 let trav = null;
 let travImage = null;
+let mapLayers = null; // Map-mode canvases from buildMapLayers
+let mode = 'map'; // 'map' | 'debug'
 let detected = null; // { profile, phoneHeight } from detectProfile
 let route = { a: null, b: null, path: null, info: '' }; // a/b are world [x, z]
 let view = { s: 80, ox: 0, oy: 0 }; // px per meter, screen offset (CSS px)
@@ -112,6 +115,7 @@ function rebuild() {
   gridImage = grid ? renderGridImage(grid) : null;
   trav = grid ? traversability(grid) : null;
   travImage = trav ? renderTravImage(grid, trav) : null;
+  mapLayers = trav ? buildMapLayers(grid, trav, cssColor) : null;
   computeRoute();
   renderStats();
   draw();
@@ -278,8 +282,82 @@ const sy = (z) => view.oy + z * view.s;
 function draw() {
   const r = canvas.getBoundingClientRect();
   ctx.clearRect(0, 0, r.width, r.height);
-  if (!scan) return;
+  if (mode === 'map') {
+    ctx.fillStyle = cssColor('--map-unknown');
+    ctx.fillRect(0, 0, r.width, r.height);
+  }
+  if (scan) (mode === 'map' ? drawMap : drawDebug)(r);
+  drawScaleBar(r);
+  $('routeInfo').textContent = route.info || (route.a ? 'click a destination' : 'click the map twice to test a route');
+}
 
+function drawMap(r) {
+  if (mapLayers) {
+    const x = sx(grid.minX), y = sy(grid.minZ), w = grid.w * grid.cell * view.s, h = grid.h * grid.cell * view.s;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(mapLayers.floor, x, y, w, h);
+    ctx.drawImage(mapLayers.roads, x, y, w, h);
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.22)';
+    ctx.shadowBlur = Math.min(10, 2 + view.s * 0.04);
+    ctx.shadowOffsetY = Math.min(4, 1 + view.s * 0.015);
+    ctx.drawImage(mapLayers.obstacles, x, y, w, h);
+    ctx.restore();
+  }
+  drawMapRoute();
+  drawStartFlag();
+  drawCompass(ctx, r.width - 34, 34, cssColor('--panel'), cssColor('--fg'), cssColor('--map-pin'));
+}
+
+function routeScreenPoints() {
+  const cellCenter = (i) => [grid.minX + ((i % grid.w) + 0.5) * grid.cell, grid.minZ + (((i / grid.w) | 0) + 0.5) * grid.cell];
+  const cells = simplifyPath(route.path, trav.cost, grid.w);
+  const pts = cells.map((i) => {
+    const [x, z] = cellCenter(i);
+    return [sx(x), sy(z)];
+  });
+  // Start/end exactly where the user clicked.
+  pts[0] = [sx(route.a[0]), sy(route.a[1])];
+  pts[pts.length - 1] = [sx(route.b[0]), sy(route.b[1])];
+  return chaikin(pts);
+}
+
+function drawMapRoute() {
+  if (route.path) {
+    const pts = routeScreenPoints();
+    ctx.lineJoin = ctx.lineCap = 'round';
+    for (const [color, width] of [[cssColor('--map-route-edge'), 10], [cssColor('--map-route'), 6]]) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      pts.forEach(([x, y], k) => (k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.stroke();
+    }
+  }
+  if (route.a) drawOrigin(ctx, sx(route.a[0]), sy(route.a[1]), '#ffffff', cssColor('--map-route'));
+  if (route.b) drawPin(ctx, sx(route.b[0]), sy(route.b[1]), cssColor('--map-pin'), '#ffffff');
+}
+
+// The shared start marker (taped L on the floor) = origin of the map.
+function drawStartFlag() {
+  const x = sx(0), y = sy(0);
+  ctx.fillStyle = cssColor('--panel');
+  ctx.strokeStyle = cssColor('--map-start');
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(x, y, 9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = cssColor('--map-start');
+  ctx.font = 'bold 10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('S', x, y + 0.5);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawDebug(r) {
   const layerImage = $('mapMode').value === 'trav' ? travImage : gridImage;
   if ($('showGrid').checked && layerImage) {
     ctx.imageSmoothingEnabled = false;
@@ -317,8 +395,6 @@ function draw() {
 
   drawRoute();
   drawStartMarker();
-  drawScaleBar(r);
-  $('routeInfo').textContent = route.info || (route.a ? 'click a destination' : 'click the map twice to test a route');
 }
 
 // Heading arrow at the latest pose: rotate viewer forward (0,0,-1) by q, project to X/Z.
@@ -392,19 +468,56 @@ function drawScaleBar(r) {
 }
 
 // ---- interaction ----
+// Zoom by factor k around screen point (mx, my).
+function zoomAt(mx, my, k) {
+  view.ox = mx - (mx - view.ox) * k;
+  view.oy = my - (my - view.oy) * k;
+  view.s *= k;
+  draw();
+}
+
 let drag = null;
+const touches = new Map(); // pointerId -> {x, y}, for pinch zoom
+let pinch = null;
 canvas.addEventListener('pointerdown', (e) => {
-  drag = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy, moved: false };
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   canvas.setPointerCapture(e.pointerId);
+  if (touches.size === 2) {
+    const [a, b] = [...touches.values()];
+    pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) };
+    drag = null;
+  } else if (touches.size === 1) {
+    drag = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy, moved: false };
+  }
 });
 canvas.addEventListener('pointermove', (e) => {
+  if (!touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && touches.size === 2) {
+    const [a, b] = [...touches.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    const r = canvas.getBoundingClientRect();
+    zoomAt((a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top, d / pinch.d);
+    pinch.d = d;
+    return;
+  }
   if (!drag) return;
   if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 4) drag.moved = true;
   view.ox = drag.ox + e.clientX - drag.x;
   view.oy = drag.oy + e.clientY - drag.y;
   draw();
 });
+canvas.addEventListener('pointercancel', (e) => {
+  touches.delete(e.pointerId);
+  pinch = null;
+  drag = null;
+});
 canvas.addEventListener('pointerup', (e) => {
+  touches.delete(e.pointerId);
+  if (pinch) {
+    if (touches.size < 2) pinch = null;
+    return;
+  }
   const click = drag && !drag.moved;
   drag = null;
   if (!click || !grid) return;
@@ -419,12 +532,33 @@ canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const r = canvas.getBoundingClientRect();
   const mx = e.clientX - r.left, my = e.clientY - r.top;
-  const k = Math.exp(-e.deltaY * 0.0015);
-  view.ox = mx - (mx - view.ox) * k;
-  view.oy = my - (my - view.oy) * k;
-  view.s *= k;
-  draw();
+  zoomAt(mx, my, Math.exp(-e.deltaY * 0.0015));
 }, { passive: false });
+const zoomCenter = (k) => {
+  const r = canvas.getBoundingClientRect();
+  zoomAt(r.width / 2, r.height / 2, k);
+};
+$('zoomIn').onclick = () => zoomCenter(1.4);
+$('zoomOut').onclick = () => zoomCenter(1 / 1.4);
+$('zoomFit').onclick = fit;
+
+// ---- Map / Debug mode (remembered) ----
+function setMode(m) {
+  mode = m === 'debug' ? 'debug' : 'map';
+  document.body.classList.toggle('mode-map', mode === 'map');
+  document.body.classList.toggle('mode-debug', mode === 'debug');
+  for (const b of document.querySelectorAll('#modeSwitch button')) b.classList.toggle('active', b.dataset.mode === mode);
+  try {
+    localStorage.setItem('iam-viewer-mode', mode);
+  } catch {}
+  draw();
+}
+for (const b of document.querySelectorAll('#modeSwitch button')) b.onclick = () => setMode(b.dataset.mode);
+let savedMode = null;
+try {
+  savedMode = localStorage.getItem('iam-viewer-mode');
+} catch {}
+setMode(params.get('mode') || savedMode || 'map');
 canvas.addEventListener('dblclick', fit);
 
 const drop = $('drop');
@@ -456,6 +590,7 @@ window.addEventListener('resize', resize);
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
   if (grid) gridImage = renderGridImage(grid);
   if (trav) travImage = renderTravImage(grid, trav);
+  if (trav) mapLayers = buildMapLayers(grid, trav, cssColor);
   draw();
 });
 

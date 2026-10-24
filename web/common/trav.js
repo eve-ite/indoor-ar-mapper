@@ -111,6 +111,36 @@ export function astar(cost, w, h, start, goal) {
   return path.reverse();
 }
 
+// String-pull an A* cell path: keep a straight segment while every cell on it is passable and no
+// pricier than its endpoints (so a walked-only route stays on walked cells). Returns cell indices.
+export function simplifyPath(path, cost, w) {
+  if (!path || path.length < 3) return path;
+  const clear = (a, b) => {
+    const limit = Math.max(cost[a], cost[b]);
+    let x0 = a % w, z0 = (a / w) | 0;
+    const x1 = b % w, z1 = (b / w) | 0;
+    const dx = Math.abs(x1 - x0), dz = -Math.abs(z1 - z0);
+    const sx = x0 < x1 ? 1 : -1, sz = z0 < z1 ? 1 : -1;
+    let err = dx + dz;
+    for (;;) {
+      if (!(cost[z0 * w + x0] <= limit)) return false;
+      if (x0 === x1 && z0 === z1) return true;
+      const e2 = 2 * err;
+      if (e2 >= dz) { err += dz; x0 += sx; }
+      if (e2 <= dx) { err += dx; z0 += sz; }
+    }
+  };
+  const out = [path[0]];
+  let i = 0;
+  while (i < path.length - 1) {
+    let j = path.length - 1;
+    while (j > i + 1 && !clear(path[i], path[j])) j--;
+    out.push(path[j]);
+    i = j;
+  }
+  return out;
+}
+
 class MinHeap {
   constructor() {
     this.k = [];

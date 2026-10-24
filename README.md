@@ -39,6 +39,7 @@ cloudflared prints a `https://<random>.trycloudflare.com` URL (new one every res
 
 ## Viewer
 
+- **Map** mode (default) draws a Google-Maps-style view: walked paths as white roads, open floor, obstacles as shadowed "buildings" (small holes filled, specks under 2.5 dm² hidden), a blue route with A dot and red pin, compass, zoom buttons, pinch zoom. **Debug** mode is the raw grid/points/sliders view. `?mode=map|debug`.
 - Pick a scan from the server list, or drop a file. `?scan=<id>` loads one directly.
 - Grid: 5 cm cells, log-odds. Trajectory cells are free; Bresenham from the phone to each hit frees the cells in between. A hit below *floor* marks free, a hit inside the *wall band* marks occupied, anything else is ignored.
 - **Ray clears below:** a ray only clears a cell where it passes below this height. A ray passing higher proves nothing about what's under it, so a handheld ray at 1.4 m doesn't erase the table it flies over.

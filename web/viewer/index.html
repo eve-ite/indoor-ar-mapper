@@ -13,6 +13,17 @@
       --line: #dde1e6;
       --accent: #12917b;
       --bad: #c94444;
+      /* Map mode, after Google Maps' default (light) style. Keep these #rrggbb: mapstyle.js parses them. */
+      --map-unknown: #e8e6e1;
+      --map-floor: #f8f7f4;
+      --map-road: #ffffff;
+      --map-road-edge: #d6d2c8;
+      --map-obst: #d3d6db;
+      --map-obst-edge: #b4b9c1;
+      --map-route: #1a73e8;
+      --map-route-edge: #ffffff;
+      --map-pin: #ea4335;
+      --map-start: #188038;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -23,6 +34,16 @@
         --line: #2a333b;
         --accent: #2bc4a8;
         --bad: #ef6b6b;
+        --map-unknown: #1b1f24;
+        --map-floor: #2b313a;
+        --map-road: #3d4552;
+        --map-road-edge: #252a31;
+        --map-obst: #5b6573;
+        --map-obst-edge: #7a8592;
+        --map-route: #8ab4f8;
+        --map-route-edge: #1b1f24;
+        --map-pin: #f28b82;
+        --map-start: #81c995;
       }
     }
     * { box-sizing: border-box; }
@@ -35,6 +56,7 @@
       grid-template-columns: 300px 1fr;
       height: 100vh;
     }
+    body.mode-map .debug-only, body.mode-debug .map-only { display: none !important; }
     aside {
       background: var(--panel);
       border-right: 1px solid var(--line);
@@ -46,6 +68,17 @@
     }
     h1 { font-size: 16px; margin: 0; }
     h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 6px; }
+    #modeSwitch { display: grid; grid-template-columns: 1fr 1fr; background: var(--bg); border-radius: 10px; padding: 3px; }
+    #modeSwitch button {
+      font: 600 14px system-ui, sans-serif;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    #modeSwitch button.active { background: var(--panel); color: var(--fg); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); }
     #scans { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
     #scans button {
       text-align: left;
@@ -87,20 +120,53 @@
     #stats { font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
     #err { color: var(--bad); }
     main { position: relative; overflow: hidden; }
-    canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+    canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
     canvas:active { cursor: grabbing; }
-    #hint { position: absolute; right: 12px; bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; }
+    #hint { position: absolute; left: 50%; transform: translateX(-50%); bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; white-space: nowrap; }
+    #zoom {
+      position: absolute;
+      right: 14px;
+      bottom: 36px;
+      display: flex;
+      flex-direction: column;
+      background: var(--panel);
+      border-radius: 10px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+      overflow: hidden;
+    }
+    #zoom button {
+      width: 40px;
+      height: 40px;
+      border: 0;
+      background: transparent;
+      color: var(--fg);
+      font: 500 20px system-ui, sans-serif;
+      cursor: pointer;
+    }
+    #zoom button + button { border-top: 1px solid var(--line); }
+    #zoom button:hover { background: var(--bg); }
     .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--muted); }
     .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    .legend i.line { height: 4px; width: 14px; vertical-align: 2px; }
+    @media (max-width: 1150px) {
+      #hint { display: none; }
+    }
     @media (max-width: 700px) {
-      body { grid-template-columns: 1fr; grid-template-rows: auto 60vh; height: auto; }
-      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      /* Phone: map first, panel below. minmax(0, 1fr) stops wide content from overflowing. */
+      body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 70vh auto; height: auto; }
+      main { order: -1; }
+      aside { border-right: 0; border-top: 1px solid var(--line); }
+      #hint { display: none; }
     }
   </style>
 </head>
-<body>
+<body class="mode-map">
   <aside>
-    <h1>Indoor AR Mapper · viewer</h1>
+    <h1>Indoor AR Mapper</h1>
+    <div id="modeSwitch">
+      <button data-mode="map" class="active">Map</button>
+      <button data-mode="debug">Debug</button>
+    </div>
     <section>
       <h2>Scans on server</h2>
       <div id="scans">loading…</div>
@@ -119,7 +185,16 @@
       </select>
       <div id="profileNote" class="note"></div>
     </section>
-    <section>
+    <section class="map-only">
+      <h2>Legend</h2>
+      <div class="legend">
+        <span><i style="background:var(--map-road);outline:1px solid var(--map-road-edge)"></i>walked path</span>
+        <span><i style="background:var(--map-floor);outline:1px solid var(--line)"></i>open floor</span>
+        <span><i style="background:var(--map-obst);outline:1px solid var(--map-obst-edge)"></i>obstacle</span>
+        <span><i class="line" style="background:var(--map-route)"></i>route</span>
+      </div>
+    </section>
+    <section class="debug-only">
       <h2>Grid</h2>
       <label class="slider">Body radius (m) <output id="bodyRadiusV"></output>
         <input id="bodyRadius" type="range" min="0.05" max="0.5" step="0.01" /></label>
@@ -134,7 +209,7 @@
       <label class="slider">Max range (m) <output id="maxRangeV"></output>
         <input id="maxRange" type="range" min="1" max="10" step="0.5" /></label>
     </section>
-    <section>
+    <section class="debug-only">
       <h2>Layers</h2>
       <select id="mapMode">
         <option value="trav">Traversability</option>
@@ -157,18 +232,23 @@
       </div>
     </section>
     <section>
-      <h2>Test route</h2>
+      <h2>Route</h2>
       <div id="routeInfo" class="note">click the map twice to test a route</div>
     </section>
-    <section>
+    <section class="debug-only">
       <h2>Stats</h2>
       <div id="stats">no scan loaded</div>
-      <div id="err"></div>
     </section>
+    <div id="err"></div>
   </aside>
   <main>
     <canvas id="map"></canvas>
-    <div id="hint">drag to pan · wheel to zoom · double-click to fit · −Z is up</div>
+    <div id="zoom">
+      <button id="zoomIn" title="Zoom in">+</button>
+      <button id="zoomOut" title="Zoom out">−</button>
+      <button id="zoomFit" title="Fit map">⤢</button>
+    </div>
+    <div id="hint">drag to pan · scroll or pinch to zoom · click twice for a route · up = start-marker forward</div>
   </main>
   <script type="module" src="./viewer.js"></script>
 </body>
