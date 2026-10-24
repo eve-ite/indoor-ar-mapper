@@ -48,7 +48,7 @@
       line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
       $('log').prepend(line);
     };
-    let device, rx, buf = '', waiting = null;
+    let device, rx, buf = '', waiting = null, noResponse = false;
     const enc = new TextEncoder(), dec = new TextDecoder();
 
     function onNotify(e) {
@@ -57,17 +57,20 @@
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i);
         buf = buf.slice(i + 1);
-        if (waiting) waiting(line);
-        else log(`← ${line}`);
+        if (!(waiting && waiting(line))) log(`← ${line}`);
       }
     }
 
     // Writes are queued: Web Bluetooth rejects a write while another one is in flight.
+    // Without-response writes don't wait a full round trip per chunk (much faster on Windows).
     let chain = Promise.resolve();
     function sendLine(line) {
       const data = enc.encode(line + '\n');
       chain = chain.then(async () => {
-        for (let i = 0; i < data.length; i += CHUNK) await rx.writeValueWithResponse(data.slice(i, i + CHUNK));
+        for (let i = 0; i < data.length; i += CHUNK) {
+          const part = data.slice(i, i + CHUNK);
+          await (noResponse ? rx.writeValueWithoutResponse(part) : rx.writeValueWithResponse(part));
+        }
       });
       return chain;
     }
@@ -89,10 +92,11 @@
         const server = await device.gatt.connect();
         const svc = await server.getPrimaryService(NUS);
         rx = await svc.getCharacteristic(RX);
+        noResponse = !!rx.properties.writeWithoutResponse;
         const tx = await svc.getCharacteristic(TX);
         tx.addEventListener('characteristicvaluechanged', onNotify);
         await tx.startNotifications();
-        log('connected: type a line, or Ping ×10', 'ok');
+        log(`connected (writes ${noResponse ? 'without' : 'with'} response): type a line, or Ping ×10`, 'ok');
         setConnected(true);
       } catch (err) {
         log(`connect failed: ${err.message}`, 'bad');
@@ -110,27 +114,39 @@
     $('send').onclick = send;
     $('text').addEventListener('keydown', (e) => e.key === 'Enter' && send());
 
+    // One run at a time; each ping waits for its own echo (unique id), anything else is "late".
+    let run = 0;
     $('ping').onclick = async () => {
+      $('ping').disabled = true;
+      run++;
       const times = [];
-      for (let n = 0; n < 10; n++) {
-        const msg = `ping ${n} ${'.'.repeat(40)}`;
-        const t0 = performance.now();
-        const back = await new Promise((resolve) => {
-          waiting = resolve;
-          sendLine(msg);
-          setTimeout(() => resolve(null), 2000);
-        });
-        waiting = null;
-        if (back !== msg) {
-          log(`ping ${n}: ${back === null ? 'timeout' : 'mismatch'}`, 'bad');
-          continue;
+      try {
+        for (let n = 0; n < 10; n++) {
+          const msg = `ping r${run} #${n} ${'.'.repeat(30)}`;
+          const t0 = performance.now();
+          const ok = await new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(false), 2000);
+            waiting = (line) => {
+              if (line !== msg) {
+                log(`← late/other: ${line}`);
+                return true;
+              }
+              clearTimeout(timer);
+              resolve(true);
+              return true;
+            };
+            sendLine(msg).catch((err) => log(`send failed: ${err.message}`, 'bad'));
+          });
+          waiting = null;
+          if (ok) times.push(performance.now() - t0);
+          else log(`ping ${n}: timeout`, 'bad');
         }
-        times.push(performance.now() - t0);
+      } finally {
+        waiting = null;
+        $('ping').disabled = !device?.gatt.connected;
       }
-      if (times.length) {
-        const avg = times.reduce((a, b) => a + b) / times.length;
-        log(`round trip OK ${times.length}/10, avg ${avg.toFixed(0)} ms, max ${Math.max(...times).toFixed(0)} ms`, times.length === 10 ? 'ok' : 'bad');
-      }
+      const avg = times.length ? times.reduce((a, b) => a + b) / times.length : 0;
+      log(`round trip ${times.length}/10 OK, avg ${avg.toFixed(0)} ms, max ${times.length ? Math.max(...times).toFixed(0) : '-'} ms`, times.length === 10 ? 'ok' : 'bad');
     };
   </script>
 </body>
