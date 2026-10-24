@@ -60,7 +60,7 @@ So a cluttered hallway you walked through stays a hallway, and routes stick to p
 
 ### Depth lidar (optional)
 
-The scan app requests WebXR `depth-sensing` (CPU path only) as an **optional** feature. If Chrome grants it, each frame also samples the depth map on a 16 × 5 grid (`common/depth.js`) and stores world points as `dpts`. Depth sees *any* surface, including clutter that ARCore never turns into planes. If it's refused, the session starts without it and the plane fan works as before. The status line says `depth ON` or `depth off`. Depth samples get an extra 8 cm height margin, because they're noisier than plane hits.
+**Opt-in: add `?depth=1` to `/scan/`** (with depth on by default the S23 froze). The scan app then requests WebXR `depth-sensing` (CPU path only) as an optional feature, samples it at 5 Hz, shows ms per sample, and pauses sampling if it averages over 25 ms. If Chrome grants it, each frame also samples the depth map on a 16 × 5 grid (`common/depth.js`) and stores world points as `dpts`. Depth sees *any* surface, including clutter that ARCore never turns into planes. If it's refused, the session starts without it and the plane fan works as before. The status line says `depth ON` or `depth off`. Depth samples get an extra 8 cm height margin, because they're noisier than plane hits.
 - Drag to pan, wheel to zoom, double-click to fit. −Z (the start-marker forward direction) is up.
 
 ## Data format (JSON Lines)
