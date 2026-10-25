@@ -209,3 +209,42 @@ A **map** is one location, made of one or more scans.
 - **Server** (`server/maps.py`): `GET /api/maps` merges three sources: maps declared by scans,
   legacy chains (`chain-<root>`), and `scans/maps.json` (maps made in the viewer, plus renames).
   `POST /api/maps` creates a map; `PUT /api/maps/{id}` renames or edits one.
+
+## Car scans (M4, branch `car-scan-m4`)
+
+The phone rides on the car and runs the normal scan app; you drive from the laptop over Bluetooth.
+
+- **Scan app:** Settings → **Mounted on the car** (or `?car=1`). The header records
+  `"platform": "car"` (handheld scans: `"handheld"`). The viewer and nav still pick the RC-car
+  profile from the phone height (< 0.7 m).
+  - Hints are for driving and are big enough to read from standing height: "Drive forward slowly",
+    "Turn slower" (> 35°/s), "Mount tilted" (> 10°), "Phone too low" (< 12 cm above the floor),
+    "Floor not found", "Swing left/right" toward far walls, "No walls seen lately".
+- **Mount:** phone **upright**, camera straight ahead, **≥ 15 cm** above the floor, and offset from
+  the turning axis (per the backlog). Upright matters a lot: from 20 cm up a camera tilted down
+  like a handheld phone sees mostly floor. In the synthetic test that's 33% of the walls mapped,
+  against 93% upright (`tools/test_car_scan.mjs`).
+- **Driving (laptop):** teleop needs no server, just localhost in Chrome/Edge (Brave blocks Web
+  Bluetooth). From the main checkout:
+  ```powershell
+  & "C:\Users\derpf\Documents\indoor-ar-mapper\server\.venv\Scripts\python.exe" -m http.server 8001 --bind 127.0.0.1 -d "C:\Users\derpf\Documents\indoor-ar-mapper\car\teleop"
+  & "C:\Program Files\Google\Chrome\Application\chrome.exe" http://127.0.0.1:8001/
+  ```
+  (or `http://localhost:8000/teleop/` if master's server is running).
+- **Procedure:**
+  1. Tape the mark. Put the car down so the **phone** (not the car's centre) is over it, facing
+     along the long arm.
+  2. Tap Start on the phone, connect teleop on the laptop, and drive forward slowly until the hint
+     says the floor is found.
+  3. Drive slowly (the car does ~4 cm/s by default), turn gently, and keep scans to 1–2 min.
+     There's no ultrasonic, so watch the car.
+  4. Stop. Mark the floor under the phone. Next scan: put the phone back over that mark, same
+     heading, then **Continue**. Car and handheld scans chain together (floors are matched at
+     each handover).
+  5. Upload as usual. The viewer's profile shows "RC car".
+- Test: `python tools/make_synthetic.py scans/car_depth.jsonl --depth --car --id car_depth`,
+  `python tools/make_synthetic.py scans/synthetic_depth.jsonl --depth`, then
+  `node tools/test_car_scan.mjs` (car profile detected, walls ≥ 60% mapped, the table blocks
+  routing, a route around it exists).
+  - `--car` puts the phone 0.2 m up at 0.1 m/s, using the app's real depth rows for an upright
+    phone (+16° to −23°) rather than the handheld generator's downward ones.

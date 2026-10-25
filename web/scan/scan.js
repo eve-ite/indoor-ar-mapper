@@ -22,6 +22,11 @@ const WALKING_SPEED = 0.25; // m/s: below this you're looking around anyway
 const WALL_MIN_ABOVE_FLOOR = 0.2; // m; matches the viewer's default wall band
 const PITCH_LIMIT_DEG = 20; // nag if the camera points further up/down than this
 const MAX_SPEED = 0.6; // m/s
+// Car mode (M4): the phone rides on the robot car, driven from the laptop's teleop page.
+const CAR_PITCH_LIMIT_DEG = 10; // stricter than handheld: tilted down 20 cm up, depth sees ~1/3 of the walls (tools/test_car_scan.mjs)
+const CAR_MAX_TURN_DEG_S = 35; // ARCore loses track when a low camera spins faster than this
+const CAR_MIN_HEIGHT = 0.12; // m: lower than this and the floor tracker (10 cm margin) can't see the floor
+const CAR_MAX_HEIGHT = 0.7; // m: above this it's not on the car (same split as the viewer's profile)
 
 const params = new URLSearchParams(location.search);
 // Optional upload base URL for when the pages are hosted separately from the server.
@@ -61,6 +66,7 @@ const ui = {
   labelBtn: $('labelBtn'),
   depth: $('depthToggle'),
   keyframes: $('kfToggle'),
+  car: $('carToggle'),
   device: $('deviceName'),
   mapPick: $('mapPick'),
 };
@@ -75,12 +81,16 @@ function loadSettings() {
   } catch {}
   ui.depth.checked = params.has('depth') ? params.get('depth') === '1' : !!saved.depth;
   ui.keyframes.checked = params.has('keyframes') ? params.get('keyframes') === '1' : !!saved.keyframes;
+  ui.car.checked = params.has('car') ? params.get('car') === '1' : !!saved.car;
   ui.device.value = params.get('device') || saved.device || '';
 }
 
 function saveSettings() {
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ depth: ui.depth.checked, keyframes: ui.keyframes.checked, device: ui.device.value.trim() }));
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify({ depth: ui.depth.checked, keyframes: ui.keyframes.checked, car: ui.car.checked, device: ui.device.value.trim() }),
+    );
   } catch {}
 }
 
@@ -147,6 +157,7 @@ renderMapPick();
 loadSettings();
 ui.depth.addEventListener('change', saveSettings);
 ui.keyframes.addEventListener('change', saveSettings);
+ui.car.addEventListener('change', saveSettings);
 ui.device.addEventListener('change', saveSettings);
 
 // Chrome's reduced UA string says "K" for every Android model; Client Hints have the real one.
@@ -189,6 +200,7 @@ function rayDir([yawDeg, pitchDeg]) {
 }
 
 // ---- recording state ----
+let carMode = false; // captured when a scan starts
 let rec = null; // { header, lines[], pending, frames, points, t0, lastT, rayHits[], rayTries }
 let lastScan = null;
 
@@ -346,6 +358,8 @@ async function startScan(continueFrom = null) {
   }
 
   document.body.classList.add('in-ar');
+  carMode = ui.car.checked;
+  document.body.classList.toggle('car', carMode);
   ui.start.hidden = ui.cont.hidden = true;
   ui.stop.hidden = false;
   if (!session.domOverlayState) say('No DOM overlay: press Android Back to stop.', 'warn');
@@ -402,6 +416,7 @@ async function startScan(continueFrom = null) {
       ? { continues: continueFrom.session_id, continues_end: { p: continueFrom.p, q: continueFrom.q }, chain: continueFrom.chain }
       : {}),
     device: ui.device.value.trim() || detectedDevice,
+    platform: carMode ? 'car' : 'handheld', // M4: phone on the robot car vs in the hand
     ref_space: 'local-floor',
     start_marker: { p: [0, 0, 0], q: [0, 0, 0, 1] },
     created: new Date().toISOString(),
@@ -451,7 +466,9 @@ async function startScan(continueFrom = null) {
     lastFrameTime: null,
     recent: [], // last HINT_WINDOW_S of recorded frames, for the live hint
   };
-  if (continueFrom) showHint('warn', 'Stand on your mark ⤓', 'Same spot and direction as where the last scan ended. Hold still a second.');
+  if (continueFrom && carMode) showHint('warn', 'Car on the mark ⤓', 'Phone over the mark, facing the way the last scan ended. Wait a second, then drive.');
+  else if (continueFrom) showHint('warn', 'Stand on your mark ⤓', 'Same spot and direction as where the last scan ended. Hold still a second.');
+  else if (carMode) showHint('warn', 'Drive forward slowly ↑', 'ARCore needs to see the floor move to find it');
   else showHint('warn', 'Move side to side ↔', 'Let ARCore find the floor before walking off');
   visCount = visHead = 0;
   visGeom.setDrawRange(0, 0);
@@ -529,7 +546,7 @@ function onXRFrame(time, frame) {
     if (side > 0.5) rec.lastRightT = t;
     else if (side < -0.5) rec.lastLeftT = t;
   }
-  rec.recent.push({ t, x: pos.x, z: pos.z, hits: pts.length + (dpts?.length || 0), walls });
+  rec.recent.push({ t, x: pos.x, z: pos.z, yaw, height: pos.y - floorY, floorSeen: rec.floor.seen, hits: pts.length + (dpts?.length || 0), walls });
   while (rec.recent.length && rec.recent[0].t < t - HINT_WINDOW_S) rec.recent.shift();
   updateHint(ori);
 
@@ -655,6 +672,7 @@ function updateHint(ori) {
   if (walls) rec.lastObstacleT = t;
   const speed = span > 0.5 ? Math.hypot(r.at(-1).x - r[0].x, r.at(-1).z - r[0].z) / span : 0;
   const pitch = pitchDeg(ori);
+  if (carMode) return updateCarHint(r, t, span, hits, walls, speed, pitch);
 
   if (trackingState === 'limited') return showHint('bad', 'Tracking shaky', 'Slow down, more light, aim at textured things');
   if (pitch < -PITCH_LIMIT_DEG) return showHint('warn', 'Tilt the phone up ↑', 'Camera straight ahead, not at the floor, so the rays reach the walls');
@@ -676,6 +694,37 @@ function updateHint(ori) {
     return showHint('warn', 'No obstacles seen lately', 'Angle the phone toward the edges (tables, walls, shelves)');
   }
   showHint('ok', 'Looking good ✓', walls ? `${walls} obstacle hits in the last ${HINT_WINDOW_S} s` : 'Floor only right now, that’s fine');
+}
+
+// Car mode: the person reads this from ~1.5 m while driving from the laptop. The car is slow and
+// can't "look around", so the dangers are spinning too fast, a mount that's tilted or too low, and
+// hugging the middle of wide spaces.
+function updateCarHint(r, t, span, hits, walls, speed, pitch) {
+  // Turn rate over the window (unwrapped yaw).
+  let turn = 0;
+  for (let i = 1; i < r.length; i++) turn += Math.atan2(Math.sin(r[i].yaw - r[i - 1].yaw), Math.cos(r[i].yaw - r[i - 1].yaw));
+  const turnRate = span > 0.5 ? Math.abs(THREE.MathUtils.radToDeg(turn) / span) : 0;
+  const last = r.at(-1);
+
+  if (trackingState === 'limited') return showHint('bad', 'Tracking shaky: stop', 'Wait a second, then drive slower. Avoid blank floor and dark spots');
+  if (pitch < -CAR_PITCH_LIMIT_DEG) return showHint('warn', 'Mount tilted down ↓', `${Math.round(-pitch)}°: from car height a tilted camera sees mostly floor. Clamp it upright`);
+  if (pitch > CAR_PITCH_LIMIT_DEG) return showHint('warn', 'Mount tilted up ↑', `${Math.round(pitch)}°: clamp the phone upright, camera straight ahead`);
+  if (span < 1) return;
+  if (turnRate > CAR_MAX_TURN_DEG_S) return showHint('warn', 'Turn slower', `${Math.round(turnRate)}°/s: ARCore loses track on fast spins. Aim for under ${CAR_MAX_TURN_DEG_S}`);
+  if (!last.floorSeen && t > 8) return showHint('bad', 'Floor not found', 'Stop. The phone may be under 15 cm, or the floor too plain: drive onto a textured patch');
+  if (!hits) return showHint('warn', 'Drive forward a little ↑', 'ARCore needs to see the floor move');
+  if (last.floorSeen && last.height < CAR_MIN_HEIGHT) return showHint('warn', 'Phone too low', `${Math.round(last.height * 100)} cm: raise the clamp to 15 cm+ so the floor is tracked`);
+  if (last.floorSeen && last.height > CAR_MAX_HEIGHT) return showHint('warn', 'Not on the car?', `Phone is ${last.height.toFixed(1)} m up. Untick "Mounted on the car" for handheld scans`);
+  if (speed > 0.05) {
+    const left = t - rec.lastLeftT, right = t - rec.lastRightT;
+    if (Math.max(left, right) > SIDE_GLANCE_S * 2) {
+      return left >= right
+        ? showHint('warn', 'Swing left ↶', 'Turn the car a little toward the left wall, then carry on')
+        : showHint('warn', 'Swing right ↷', 'Turn the car a little toward the right wall, then carry on');
+    }
+  }
+  if (t - rec.lastObstacleT > NO_OBSTACLE_NAG_S * 2) return showHint('warn', 'No walls seen lately', 'Drive closer to the walls and furniture');
+  showHint('ok', 'Driving fine ✓', `${(speed * 100).toFixed(0)} cm/s · ${walls ? walls + ' obstacle hits' : 'floor only'}`);
 }
 
 function flush() {
