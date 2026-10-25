@@ -25,13 +25,13 @@ Repo: `C:\Users\derpf\Documents\indoor-ar-mapper` (git, branch `master`; no remo
 
 ```
 server/main.py          FastAPI: POST/GET /api/scans, serves web/; includes car_relay
-server/car_relay.py     /car + /drive WebSocket relay, /teleop static mount  (branch car-m3)
+server/car_relay.py     /car + /drive WebSocket relay, /teleop static mount
 web/scan/               M1 phone scan app (WebXR, hit-test fan, optional depth, IndexedDB)
 web/viewer/             M2 viewer: Map = 3D blocks (view3d.js), Debug = 2D grid/points
 web/common/             shared: jsonl.js, floor.js (floor tracker), grid.js (occupancy +
                         walked corridor), trav.js (traversability, A*, simplifyPath), depth.js
 web/vendor/             three.js r170 + OrbitControls (vendored; no CDN at the venue)
-car/                    M3 (branch car-m3): firmware/, teleop/, mock_car.py, tests/, tools/,
+car/                    M3: firmware/, teleop/ (Web Bluetooth), mock_car.py, tests/, tools/,
                         WIRING.md (wiring source of truth), README.md
 tools/make_synthetic.py synthetic room scans (--depth adds depth samples) for testing
 scans/                  uploaded scans (gitignored)
@@ -48,7 +48,7 @@ web/viewer/floorcolor.js floor coloured from photos (projection + occlusion)
 |---|---|
 | **M1** handheld scan | **Done, tested on the S23.** 28-ray hit-test fan (7 yaws × pitch 0/−10/−20/−30°), live hints (tilt, speed, side-to-side), IndexedDB crash recovery, download/upload. Optional **depth lidar** toggle (Settings) works on the S23 without flags. |
 | **M2** viewer | **Done.** Map mode is a 3D view: obstacles are blocks extruded to the scanned height, the floor is a plane with walked paths tinted, and click twice to plan an A* route. Debug mode is the 2D grid/points with tuning sliders. Person/RC-car profile auto-detected from the phone height. |
-| **M3** car drives | **Software done on branch `car-m3`, not merged.** **Bluetooth LE is the primary link and is verified on the real board** (no motors wired yet): 20 Hz commands, 10 Hz telemetry, deadman stops 301 ms after the last command. A page disconnect is also caught by the deadman, because Windows holds the BLE link ~3 s. Teleop has a Connect Bluetooth button (Chrome/Edge). WiFi mode remains behind `CONTROL_LINK`. Mock + automated tests pass. **Gotcha:** init BLE from `setup()`, not the core-0 task, or the UART service is missing. |
+| **M3** car drives | **Done; branch `car-m3` (merged into `master` once the user runs the fast-forward).** Car assembled on a cardboard mule, both motors drive. **Bluetooth LE is the link** (Web Bluetooth teleop, Chrome/Edge): 20 Hz commands, 10 Hz telemetry, the deadman stops 301 ms after the last command (it also catches page disconnects, since Windows holds the BLE link ~3 s). Full-step drive with live-tunable speed/accel/decel from teleop. **The ultrasonic is dead** (no replacement): the car runs without it (forward allowed, teleop warns "NO ECHO"). Still to do on the floor: raise the top speed until a wheel stalls, then rerun the stop tests. |
 | **M4** car scan | Not started (needs the built car). |
 | **M5** navigation | Not started. A*, path smoothing and traversability already exist in `web/common/trav.js`, so it's mostly the AR side. |
 | **Textures** (bonus) | **Built on branch `textures-exploration`, not merged, not yet run on the S23.** Camera photos during scans (opt-in), photo frustums + photo-coloured floor in the viewer, nerfstudio export. Verified on synthetic scans only. See Textures below. |
@@ -112,12 +112,17 @@ since session start.
   `<tunnel>/camtest/` once so it caches, then test asynchronously.
 
 ## Car (M3)
-- **Board:** YD-ESP32-23 (ESP32-S3 N16R8, a DevKitC-1 clone), now on the laptop's **COM12, the
-  native USB port**. Its CH343 COM/UART port (formerly COM11) stopped enumerating on 2026-10-24.
-  arduino-cli (bundled with Arduino IDE 2) + esp32 core 3.3.12. FQBN for the native port:
-  `esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc`
-  (drop `CDCOnBoot=cdc` on the UART port). The venue WiFi "Cal Hacks 13.0" is 5/6 GHz only, so the
-  2.4 GHz-only S3 can't join it; BLE is the car link.
+- **Board:** YD-ESP32-23 (ESP32-S3 N16R8, a DevKitC-1 clone). It's normally on **COM11**, the
+  CH343 COM/UART port, which works again; the native USB port shows up as COM12 if used.
+  arduino-cli (bundled with Arduino IDE 2) + esp32 core 3.3.12. FQBN for the UART port:
+  `esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB`; add
+  `,CDCOnBoot=cdc` when using the native port. **Don't pipe `arduino-cli upload` into
+  `Select-Object -First N`**: PowerShell kills the uploader mid-flash and the board boot-loops.
+  The venue WiFi "Cal Hacks 13.0" is 5/6 GHz only, so the 2.4 GHz-only S3 can't join it; BLE is
+  the car link.
+- **Bring-up lessons:** a half-seated ESP32 in the breadboard made one motor buzz and the other die,
+  and the 5 V rail was once shorted to GND. Check seating and the rail first. Motor directions
+  are set: `LEFT_DIR -1`, `RIGHT_DIR -1`.
 - **Hardware:** 2× 28BYJ-48 + ULN2003 (steppers), HC-SR04 (echo via 1k/2k divider), IR module,
   MPU6050. **`car/WIRING.md` is the wiring source of truth**; `car/firmware/car/config.h`
   mirrors it. Don't change pins.
@@ -127,8 +132,16 @@ since session start.
   `{"type":"drive","v":-1..1,"w":-1..1,"seq":n}` (v forward +, w turn left +) and telemetry
   `{"type":"telemetry","dist_cm","ir_blocked","left_steps","right_steps","yaw_rate","rssi","uptime_ms","blocked","seq"}`.
   Over BLE, every message is a `\n`-terminated line, split into MTU-sized pieces.
-- **Speed:** ~2 cm/s at the default `MAX_STEP_RATE 400` (bench: 200 works, 800 skips).
-- **Ultrasonic:** an echo timeout ("nothing in range") counts as clear; a missing sensor ("no_echo") also counts as clear by default (teleop warns). Forward is blocked only on a real reading under 15 cm.
+- **Speed:** **FULL4WIRE** (2048 steps/rev). The default `MAX_STEP_RATE 400` full-steps/s is
+  ~4 cm/s. Speeding up ramps at `ACCEL 400` steps/s², and normal stops slow at `DECEL 1200`. All
+  three are live-tunable from the teleop page (`{"type":"set","max_step_rate","accel","decel"}`)
+  and saved on the car. Safety stops (deadman, link lost, forward block) skip the ramp, so the
+  deadman still stops within 300 ms. The datasheet's 600/1000 pps figures are probably half-step,
+  so the real full-step ceiling is likely below 1000.
+- **Ultrasonic:** **the HC-SR04 is dead and there's no replacement.** Diagnosed with
+  `bringup_us_diag`: ECHO never rises, with power and the divider confirmed. The firmware treats
+  "no echo" as clear, so forward works; teleop shows a red "NO ECHO". With a working sensor,
+  only a real reading under 15 cm blocks forward, and an echo timeout counts as clear.
 
 ## Run and test
 ```sh
@@ -152,7 +165,7 @@ Tests (no hardware needed):
   Phone page: `<tunnel>/camtest/`.
 
 Dev tools:
-- `uv run --with pyserial car/tools/serial_tail.py COM12 --seconds 5 --send show`
+- `uv run --with pyserial car/tools/serial_tail.py COM11 --seconds 5 --send show`
 - `uv run --with bleak car/tools/ble_probe.py echo|drive`
 
 ## Working in parallel (rules for agents)
@@ -163,7 +176,7 @@ Dev tools:
   - `server/main.py`: add routes only, via a separate module plus one include line.
   - `web/common/*`: shared by the viewer, scan app and (later) nav. Changes need the existing
     tests and screenshots to still pass.
-- **Hardware is single-user:** only one agent may use the board's COM port (COM12) / flash the board at a time. Say so before
+- **Hardware is single-user:** only one agent may use the board's COM port (COM11) / flash the board at a time. Say so before
   you flash.
 - **Ports:** 8000 is the dev server. Tests use 8790/8791. **Windows reserves port 8765**, don't use it.
 - **Memory is tight on this laptop:** don't leave servers, tunnels or headless browsers running
@@ -179,8 +192,9 @@ Dev tools:
 - Before handing back: run the tests for anything you touched and report pass/fail honestly.
 
 ## Backlog (good parallel tasks)
-1. **Car BLE primary link**: done on `car-m3`, waiting for the user's Chrome teleop check and the
-   merge. Next on the car: wire the motors and sensors (`car/WIRING.md` bring-up order), then M4.
+1. **Car**: M3 done. Next: floor speed tuning plus the stop tests once the printed chassis is on,
+   then **M4** (phone on the car, same scan app). There's no ultrasonic, so drive slowly, and
+   obstacle data comes from the phone's depth/hit-tests instead.
 2. **M5 nav app** (`web/nav/`): load a scan, start on the start marker, run A* with
    `common/trav.js` (`astar`, `simplifyPath`), and draw three.js AR arrows along the path. Reuse the
    scan app's WebXR session setup. Destinations = room labels (`scan-chaining` branch).
