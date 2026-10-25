@@ -4,6 +4,10 @@ import * as THREE from 'three';
 import { OrbitControls } from '../vendor/OrbitControls.js';
 import { TRAV } from '../common/trav.js';
 import { close, dropSpecks } from './mapstyle.js';
+import { wallMask } from '../common/plan.js';
+import { poseMatrix } from '../common/keyframes.js';
+
+const PLAN_WALL_H = 1.2; // m: uniform wall height in floor-plan mode (reads like a plan, not a skyline)
 
 const BLOCK = 2; // grid cells per block side (2 x 5 cm = 10 cm blocks)
 const MIN_OBSTACLE_CELLS = 10; // hide specks under 2.5 dm² (routing still sees them)
@@ -36,7 +40,11 @@ export class View3D {
 
     this.mapGroup = new THREE.Group();
     this.routeGroup = new THREE.Group();
-    this.scene.add(this.mapGroup, this.routeGroup);
+    this.labelGroup = new THREE.Group(); // room labels: name tag on a post
+    this.photoGroup = new THREE.Group(); // keyframe frustums + thumbnails
+    this.scene.add(this.mapGroup, this.routeGroup, this.labelGroup, this.photoGroup);
+    this.floorPlan = false;
+    this.floorColors = null; // RGBA per grid cell from photos, or null
 
     this.onPick = null;
     this.pickFloor();
@@ -51,6 +59,7 @@ export class View3D {
   }
 
   applyTheme() {
+    this.themeVersion = (this.themeVersion || 0) + 1; // built map groups use theme colours: rebuild
     this.scene.background = new THREE.Color(this.color('--map-unknown'));
     this.render();
   }
@@ -93,10 +102,38 @@ export class View3D {
     }
   }
 
+  // Floor-plan mode: structure only (walls), uniform height, plain floor. Display-only.
+  setFloorPlan(on) {
+    this.floorPlan = on;
+  }
+
+  // Builds (or reuses) the map for the current mode. Both the normal and the floor-plan version are
+  // kept once built, so toggling floor plan just swaps which one is shown.
   setMap(grid, trav) {
-    this.clear(this.mapGroup);
-    const { w, h, cell, minX, minZ } = grid;
+    const key = this.floorPlan ? 'plan' : 'normal';
+    if (this.built?.trav !== trav || this.built?.theme !== this.themeVersion) {
+      for (const g of [this.built?.plan, this.built?.normal]) if (g) this.clear(g);
+      this.built = { trav, theme: this.themeVersion };
+    }
     this.grid = grid;
+    if (!this.built[key]) this.built[key] = this.buildMap(grid, trav, key === 'plan');
+    this.mapGroup.remove(...this.mapGroup.children); // detach only: built groups are reused
+    this.mapGroup.add(this.built[key]);
+    this.blockCount = this.built[key].userData.blockCount;
+    this.render();
+    // Pre-build the other version while the browser is idle, so the first toggle is instant too.
+    const other = this.floorPlan ? 'normal' : 'plan';
+    const built = this.built;
+    const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300));
+    idle(() => {
+      if (this.built === built && !built[other]) built[other] = this.buildMap(grid, trav, other === 'plan');
+    });
+  }
+
+  // plan: build the floor-plan version (explicit, so idle pre-builds don't use the current mode).
+  buildMap(grid, trav, plan) {
+    const group = new THREE.Group();
+    const { w, h, cell, minX, minZ } = grid;
 
     // Floor: one texel per cell, unknown transparent, walked tinted.
     const tex = document.createElement('canvas');
@@ -106,10 +143,19 @@ export class View3D {
     const img = tctx.createImageData(w, h);
     const floorRGB = rgb(this.color('--map-floor'));
     const walkRGB = rgb(this.color('--map-road'));
-    const known = close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2);
+    // Cleaned masks depend only on (grid, trav): cache them so toggling floor plan / theme doesn't
+    // redo the clean-up on a multi-million-cell venue grid.
+    if (this.cache?.trav !== trav) this.cache = { trav };
+    const cached = (key, make) => (this.cache[key] ??= make());
+    const known = cached('known', () => close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2));
+    const photo = this.floorColors && this.floorColors.length === w * h * 4 ? this.floorColors : null;
     for (let i = 0; i < w * h; i++) {
+      if (photo && photo[i * 4 + 3]) {
+        img.data.set(photo.subarray(i * 4, i * 4 + 4), i * 4); // what the camera saw
+        continue;
+      }
       if (!known[i]) continue;
-      img.data.set(trav.tier[i] === TRAV.WALKED ? walkRGB : floorRGB, i * 4);
+      img.data.set(trav.tier[i] === TRAV.WALKED && !plan ? walkRGB : floorRGB, i * 4);
       img.data[i * 4 + 3] = 255;
     }
     tctx.putImageData(img, 0, 0);
@@ -123,10 +169,12 @@ export class View3D {
     floor.rotation.x = -Math.PI / 2; // plane's +Y (texture top) -> -Z, so texture row 0 = minZ
     floor.position.set(minX + (w * cell) / 2, 0, minZ + (h * cell) / 2);
     floor.receiveShadow = true;
-    this.mapGroup.add(floor);
+    group.add(floor);
 
     // Blocks: obstacle mask cleaned up, then one box per BLOCK x BLOCK group of cells.
-    const mask = dropSpecks(close(Uint8Array.from(trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS);
+    const mask = plan
+      ? cached('walls', () => dropSpecks(close(wallMask(grid, trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS))
+      : cached('obstacles', () => dropSpecks(close(Uint8Array.from(trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS));
     const blocks = [];
     for (let bz = 0; bz < h; bz += BLOCK) {
       for (let bx = 0; bx < w; bx += BLOCK) {
@@ -183,13 +231,13 @@ export class View3D {
     const high = new THREE.Color(this.color('--map-obst-edge'));
     const c = new THREE.Color();
     blocks.forEach((b, k) => {
-      const hgt = Math.max(MIN_BLOCK_H, b.smoothTop);
+      const hgt = plan ? PLAN_WALL_H : Math.max(MIN_BLOCK_H, b.smoothTop);
       m.makeScale(size * 0.98, hgt, size * 0.98);
       m.setPosition(minX + (b.bx + BLOCK / 2) * cell, 0, minZ + (b.bz + BLOCK / 2) * cell);
       mesh.setMatrixAt(k, m);
       mesh.setColorAt(k, c.copy(low).lerp(high, Math.min(1, hgt / 2)));
     });
-    this.mapGroup.add(mesh);
+    group.add(mesh);
 
     // Start marker: flat ring at the origin.
     const ring = new THREE.Mesh(
@@ -198,7 +246,7 @@ export class View3D {
     );
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = 0.01;
-    this.mapGroup.add(ring);
+    group.add(ring);
 
     // Sun + shadow camera cover the map.
     const cx = minX + (w * cell) / 2, cz = minZ + (h * cell) / 2, span = Math.max(w, h) * cell;
@@ -210,7 +258,98 @@ export class View3D {
     sc.near = 0.1;
     sc.far = span * 3;
     sc.updateProjectionMatrix();
-    this.blockCount = blocks.length;
+    group.userData.blockCount = blocks.length;
+    return group;
+  }
+
+  // labels: [{ name, p: [x, y, z] }]. A name tag on a thin post at each spot, always readable.
+  setLabels(labels) {
+    this.clear(this.labelGroup);
+    for (const l of labels || []) {
+      const c = document.createElement('canvas');
+      const ctx = c.getContext('2d');
+      const font = 'bold 44px system-ui, sans-serif';
+      ctx.font = font;
+      const tw = Math.ceil(ctx.measureText(l.name).width);
+      c.width = tw + 40;
+      c.height = 72;
+      ctx.font = font;
+      ctx.fillStyle = this.color('--map-route');
+      ctx.beginPath();
+      ctx.roundRect(0, 0, c.width, c.height, 18);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(l.name, 20, c.height / 2 + 2);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const tag = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }));
+      const hPx = 0.045; // fraction of the view height: tags stay readable at any zoom
+      tag.scale.set((hPx * c.width) / c.height, hPx, 1);
+      tag.position.set(l.p[0], 1.6, l.p[2]);
+      tag.renderOrder = 10;
+      const post = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.02, 1.6, 8),
+        new THREE.MeshStandardMaterial({ color: this.color('--map-route') }),
+      );
+      post.position.set(l.p[0], 0.8, l.p[2]);
+      post.castShadow = true;
+      this.labelGroup.add(tag, post);
+    }
+    this.render();
+  }
+
+  // RGBA per grid cell (from floorcolor.js) or null; takes effect on the next setMap().
+  setFloorColors(rgba) {
+    if (rgba === this.floorColors) return;
+    this.floorColors = rgba;
+    // The cached map builds have the old floor baked in: drop them (setMap rebuilds).
+    for (const g of [this.built?.plan, this.built?.normal]) if (g) this.clear(g);
+    this.built = null;
+  }
+
+  // Keyframes as small camera frustums at their capture pose, with the photo on the far plane.
+  // urlFor(kf) -> image URL, or null when the photo isn't available (e.g. a dropped local file).
+  setKeyframes(keyframes, urlFor) {
+    this.clear(this.photoGroup);
+    if (!keyframes?.length) return this.render();
+    const D = 0.22; // m: frustum depth
+    const lineMat = new THREE.LineBasicMaterial({ color: this.color('--map-route') });
+    const loader = new THREE.TextureLoader();
+    for (const kf of keyframes) {
+      const K = kf.intrinsics;
+      const hw = (K.w / 2 / K.fx) * D, hh = (K.h / 2 / K.fy) * D; // half-size of the far plane
+      // Corners in camera space (camera looks down -Z), offset for an off-centre principal point.
+      const ox = ((K.w / 2 - K.cx) / K.fx) * D, oy = ((K.cy - K.h / 2) / K.fy) * D;
+      const c = [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]].map(([x, y]) => new THREE.Vector3(x + ox, y + oy, -D));
+      const o = new THREE.Vector3();
+      const pts = [o, c[0], o, c[1], o, c[2], o, c[3], c[0], c[1], c[1], c[2], c[2], c[3], c[3], c[0]];
+      const g = new THREE.Group();
+      g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
+      const url = urlFor(kf);
+      if (url) {
+        const quad = new THREE.Mesh(
+          new THREE.PlaneGeometry(2 * hw, 2 * hh),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.92 }),
+        );
+        quad.position.set(ox, oy, -D);
+        loader.load(url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          quad.material.map = tex;
+          quad.material.needsUpdate = true;
+          this.render();
+        });
+        g.add(quad);
+      }
+      g.matrixAutoUpdate = false;
+      g.matrix.fromArray(poseMatrix(kf.p, kf.q));
+      this.photoGroup.add(g);
+    }
+    this.render();
+  }
+
+  showKeyframes(on) {
+    this.photoGroup.visible = on;
     this.render();
   }
 
@@ -252,6 +391,13 @@ export class View3D {
     const span = Math.max((w * cell) / this.camera.aspect, h * cell, 2);
     const dist = (span / 2 / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.15;
     const tilt = THREE.MathUtils.degToRad(35); // from vertical: steep enough to see over walls
+    // Clipping range sized to the map: a fixed 200 m far plane cut off the far end of a tilted
+    // ~110 m venue chain. Zoom-out is capped so the far plane always covers the whole map.
+    const diag = Math.hypot(w * cell, h * cell);
+    this.controls.maxDistance = Math.max(dist * 3, 20);
+    this.camera.far = this.controls.maxDistance + diag + 10;
+    this.camera.near = Math.max(0.02, dist / 4000);
+    this.camera.updateProjectionMatrix();
     this.controls.target.set(cx, 0, cz);
     this.camera.position.set(cx, dist * Math.cos(tilt), cz + dist * Math.sin(tilt));
     this.controls.update();

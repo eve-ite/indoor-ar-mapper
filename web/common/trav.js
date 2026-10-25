@@ -1,10 +1,15 @@
 // Traversability on top of the occupancy grid, plus A*. Shared by the viewer and (later) the nav app.
 //
 // Three tiers, by trust:
-//   walked     proven passable (someone/the car physically went there)  -> cheapest, never vetoed
+//   walked     proven passable (someone/the car physically went there)  -> cheapest; vetoed only by an
+//              obstacle seen there AFTER the walk (e.g. a table moved onto the corridor)
 //   floor seen floor-plane hits / free rays, probably passable           -> allowed, costs more
 //   obstacle   occupied cells, inflated by the traveller's radius        -> blocked (unless walked)
 // Unknown cells are blocked: only route where we have evidence.
+//
+// Newest wins: an obstacle that a later pass saw through (a ray at its height, recencySlack+ later)
+// is dropped, and one seen recencySlack+ after the walk blocks the walked corridor. Evidence from the
+// same pass is never treated as a change, so floor seen under a table can't erase it.
 
 export const TRAV = { BLOCKED: 0, WALKED: 1, SEEN: 2 };
 
@@ -13,7 +18,28 @@ export const TRAV_DEFAULTS = {
   obsMin: 2, // obstacle hits in a 3x3 neighbourhood (15 cm) = obstacle
   freeL: -0.5, // log-odds below this = floor seen
   seenCost: 4, // per-cell cost of floor-seen cells relative to walked ones
+  recencySlack: 15, // s: observations closer together than this count as the same pass
+  transientSpan: 2, // s: obstacle hits at a spot all within this, then seen through 2+ times = a passer-by
+  transientClears: 2,
 };
+
+// Max-filter of per-cell times over a disk (cells without a time stay at -Infinity).
+function dilateMax(vals, mask, w, h, r) {
+  const out = new Float32Array(w * h).fill(-Infinity);
+  const disk = [];
+  for (let dz = -r; dz <= r; dz++) for (let dx = -r; dx <= r; dx++) if (dx * dx + dz * dz <= r * r) disk.push([dx, dz]);
+  for (let z = 0; z < h; z++) {
+    for (let x = 0; x < w; x++) {
+      const i = z * w + x;
+      if (!mask[i]) continue;
+      for (const [dx, dz] of disk) {
+        const nx = x + dx, nz = z + dz;
+        if (nx >= 0 && nz >= 0 && nx < w && nz < h && vals[i] > out[nz * w + nx]) out[nz * w + nx] = vals[i];
+      }
+    }
+  }
+  return out;
+}
 
 function dilate(mask, w, h, r) {
   if (r <= 0) return mask;
@@ -36,6 +62,18 @@ function dilate(mask, w, h, r) {
 export function traversability(grid, opts = {}) {
   const o = { ...TRAV_DEFAULTS, ...opts };
   const { w, h, L, obs, walked } = grid;
+  const NEVER = new Float32Array(w * h).fill(-1e9);
+  const obsT = grid.obsT || NEVER, clearT = grid.clearT || NEVER, walkedT = grid.walkedT || NEVER;
+  // Obstacles a later pass saw straight through (moved away).
+  const cleared = new Uint8Array(w * h);
+  const obsFirstT = grid.obsFirstT, clearN = grid.clearN;
+  for (let i = 0; i < cleared.length; i++) {
+    if (!obs[i]) continue;
+    if (clearT[i] > obsT[i] + o.recencySlack) cleared[i] = 1; // moved away (later visit)
+    // People walking past: only seen briefly, then seen through. Tables are hit over many seconds
+    // as you walk by, so they never qualify.
+    else if (obsFirstT && obsT[i] - obsFirstT[i] < o.transientSpan && clearN[i] >= o.transientClears) cleared[i] = 1;
+  }
   // Obstacle: enough obstacle hits in the 3x3 neighbourhood (depth hits are sparse per 5 cm cell),
   // regardless of floor seen in the same cells (floor under a table top).
   const occ = new Uint8Array(w * h);
@@ -45,26 +83,33 @@ export function traversability(grid, opts = {}) {
       for (let dz = -1; dz <= 1; dz++) {
         for (let dx = -1; dx <= 1; dx++) {
           const nx = x + dx, nz = z + dz;
-          if (nx >= 0 && nz >= 0 && nx < w && nz < h) n += obs[nz * w + nx];
+          if (nx >= 0 && nz >= 0 && nx < w && nz < h && !cleared[nz * w + nx]) n += obs[nz * w + nx];
         }
       }
-      if (n >= o.obsMin || L[z * w + x] > o.occL) occ[z * w + x] = 1;
+      const i = z * w + x;
+      if (!cleared[i] && (n >= o.obsMin || L[i] > o.occL)) occ[i] = 1;
     }
   }
-  const blocked = dilate(occ, w, h, Math.round(grid.opts.bodyRadius / grid.cell));
+  const r = Math.round(grid.opts.bodyRadius / grid.cell);
+  const blocked = dilate(occ, w, h, r);
+  // When was each blocked cell's obstacle last seen? (for the walked-corridor veto)
+  const blockT = dilateMax(obsT, occ, w, h, r);
 
   const tier = new Uint8Array(w * h);
   const cost = new Float32Array(w * h).fill(Infinity);
   for (let i = 0; i < tier.length; i++) {
-    if (walked[i]) {
+    const movedIn = walked[i] && blocked[i] && blockT[i] > walkedT[i] + o.recencySlack;
+    if (walked[i] && !movedIn) {
       tier[i] = TRAV.WALKED;
       cost[i] = 1;
-    } else if (!blocked[i] && L[i] < o.freeL) {
+    } else if (!blocked[i] && (L[i] < o.freeL || cleared[i])) {
+      // cleared: a later ray went through where the obstacle was, so it's open now even though the
+      // older obstacle votes still outweigh the newer free ones in L.
       tier[i] = TRAV.SEEN;
       cost[i] = o.seenCost;
     }
   }
-  return { tier, cost, occ };
+  return { tier, cost, occ, cleared };
 }
 
 // 8-connected A* over the cost grid. start/goal are cell indices.

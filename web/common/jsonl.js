@@ -7,6 +7,8 @@ export const APP_VERSION = '0.1';
 export function parseScan(text) {
   let header = null;
   const frames = [];
+  const labels = []; // room/place names recorded while scanning: { t, name, p: [x, floorY, z] }
+  const keyframes = []; // camera photos (textures branch): { t, p, q, intrinsics, img }
   let skipped = 0;
   for (const line of text.split('\n')) {
     const s = line.trim();
@@ -20,8 +22,11 @@ export function parseScan(text) {
     }
     if (obj.type === 'header' && !header) header = obj;
     else if (obj.type === 'frame' && Array.isArray(obj.p)) frames.push(obj);
+    else if (obj.type === 'label' && Array.isArray(obj.p) && obj.name) labels.push(obj);
+    else if (obj.type === 'keyframe' && Array.isArray(obj.p) && obj.intrinsics && obj.img) keyframes.push(obj);
   }
-  return { header, frames, skipped };
+  keyframes.sort((a, b) => a.t - b.t); // written once stored, so possibly out of order
+  return { header, frames, labels, keyframes, skipped };
 }
 
 export function toLine(obj) {

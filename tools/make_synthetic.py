@@ -50,37 +50,155 @@ def ray_box_enter(o, d, lo, hi):
     return tmin if tmin <= tmax else math.inf
 
 
-def depth_samples(o, yaw, rng):
-    """Depth-map samples: a 16 x 5 grid over ~60 x 45 deg below the horizon, 2% range noise."""
+PERSON = ((-1.8, -1.0), (1.8, -1.0), 15.0, 17.5)  # crosses in front of the scanner (s)
+
+
+def person_box(t):
+    """--person: a 0.4 x 1.7 x 0.4 m person crossing the room, or None when not in view."""
+    if "--person" not in sys.argv:
+        return None
+    (ax, az), (bx, bz), t0, t1 = PERSON
+    if not t0 <= t <= t1:
+        return None
+    f = (t - t0) / (t1 - t0)
+    x, z = ax + (bx - ax) * f, az + (bz - az) * f
+    return ((x - 0.2, 0.0, z - 0.2), (x + 0.2, 1.7, z + 0.2))
+
+
+def depth_samples(o, yaw, rng, t=0.0):
+    person = person_box(t)
+    """Depth-map samples: a 16-column grid over ~60 deg, rows below the horizon, 2% range noise.
+    --depth-max (default 5 m, the old app) and --rows-up (the app's extra row just above centre)."""
     out = []
-    for p_deg in (-5, -14, -23, -32, -41):
+    max_range = float(arg("--depth-max", 5))
+    rows = ((3,) if "--rows-up" in sys.argv else ()) + (-5, -14, -23, -32, -41)
+    for p_deg in rows:
         for i in range(16):
             a = yaw + math.radians(-30 + 60 * i / 15)
             b = math.radians(p_deg)
             d = (-math.sin(a) * math.cos(b), math.sin(b), -math.cos(a) * math.cos(b))
             tt = min(ray_box_exit(o, d, *ROOM), ray_box_enter(o, d, *TABLE))
-            if not 0.3 < tt < 5:
+            if person:
+                tt = min(tt, ray_box_enter(o, d, *person))
+            if not 0.3 < tt < max_range:
                 continue
             tt *= 1 + rng.gauss(0, DEPTH_NOISE)
             out.append([round(o[k] + d[k] * tt, 3) for k in range(3)])
     return out
 
 
+def arg(name, default=None):
+    """--name value from argv (for the moved-furniture test)."""
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+if arg("--room"):  # --room x0,z0,x1,z1 (2.5 m high), e.g. a wide hallway
+    rx0, rz0, rx1, rz1 = map(float, arg("--room").split(","))
+    ROOM = ((rx0, 0.0, rz0), (rx1, 2.5, rz1))
+
+if arg("--table"):  # --table x0,z0,x1,z1 (height stays 0.75 m)
+    x0, z0, x1, z1 = map(float, arg("--table").split(","))
+    TABLE = ((x0, 0.0, z0), (x1, 0.75, z1))
+
+SHORT_LOOP = [(0, 0), (0, -1.3), (0.9, -1.0), (0.6, -0.3), (0, 0)]
+
+
 def waypoints():
+    if arg("--path") == "revisit":  # the normal loop, then walk back past the middle of the room
+        return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.7, -3.2), (1.7, -1.8), (0.8, -0.5), (0, 0), (0, -1.8), (0.9, -1.4)]
+    if arg("--path") == "short":
+        return SHORT_LOOP
+    if arg("--path") == "hall":  # straight down the middle, no looking around needed
+        return [(0, 0), (0, -18)]
     # loop around the table, starting at the origin facing -Z
     return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.7, -3.2), (1.7, -1.8), (0.8, -0.5), (0, 0)]
+
+
+# ---- --photos: ray-cast keyframe images, written next to the JSONL as <stem>_kf/kf_0000.png ----
+KF_W, KF_H, KF_F = 240, 180, 200.0  # px; ~62 deg horizontal FOV
+KF_PITCH = math.radians(-25)  # phones look down a bit
+KF_EVERY = 0.3  # m, like the scan app's gate
+RUG = ((-1.5, -1.5), (-0.7, -0.7))  # red rug on the floor (x/z min, max): a known landmark
+
+
+def quat_yaw_pitch(yaw, pitch):
+    """Yaw about +Y, then pitch about the camera's own X. Returns [x, y, z, w]."""
+    sy, cy, sp, cp = math.sin(yaw / 2), math.cos(yaw / 2), math.sin(pitch / 2), math.cos(pitch / 2)
+    return [cy * sp, cp * sy, -sy * sp, cy * cp]
+
+
+def rot(q):
+    x, y, z, w = q
+    return [
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ]
+
+
+def floor_colour(x, z):
+    if RUG[0][0] <= x <= RUG[1][0] and RUG[0][1] <= z <= RUG[1][1]:
+        return (220, 40, 40)
+    ix, iz = math.floor(x / 0.5), math.floor(z / 0.5)  # 50 cm tiles, 4 colours
+    return [(235, 220, 170), (170, 200, 235), (190, 230, 180), (230, 190, 220)][(ix % 2) * 2 + (iz % 2)]
+
+
+def shade(o, d):
+    t_room = ray_box_exit(o, d, *ROOM)
+    t_table = ray_box_enter(o, d, *TABLE)
+    if t_table < t_room:
+        return (140, 95, 60)  # table: brown
+    hx, hy, hz = (o[k] + d[k] * t_room for k in range(3))
+    if hy <= 1e-6:
+        return floor_colour(hx, hz)
+    if hy >= ROOM[1][1] - 1e-6:
+        return (245, 245, 245)  # ceiling
+    stripe = int((hx + hz) / 0.25) % 2  # walls: grey stripes
+    return (180, 180, 185) if stripe else (150, 150, 158)
+
+
+def render_png(path, o, q):
+    import struct
+    import zlib
+
+    R = rot(q)
+    cx, cy = KF_W / 2, KF_H / 2
+    raw = bytearray()
+    for v in range(KF_H):
+        raw.append(0)  # PNG filter: none
+        for u in range(KF_W):
+            dc = ((u + 0.5 - cx) / KF_F, -(v + 0.5 - cy) / KF_F, -1.0)  # top-left pixel origin
+            d = [R[i][0] * dc[0] + R[i][1] * dc[1] + R[i][2] * dc[2] for i in range(3)]
+            raw.extend(shade(o, d))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", KF_W, KF_H, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(png)
 
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "synthetic.jsonl"
     truncate = "--truncate" in sys.argv
-    depth = "--depth" in sys.argv
+    photos = "--photos" in sys.argv
+    depth = "--depth" in sys.argv or photos
+    if photos:
+        import os
+
+        kf_dir = os.path.splitext(out)[0] + "_kf"
+        os.makedirs(kf_dir, exist_ok=True)
+        last_kf = None
+        n_kf = 0
     rng = random.Random(42)
     lines = [
         {
             "type": "header",
-            "session_id": "synthetic_depth" if depth else "synthetic",
+            "session_id": arg("--id") or ("synthetic_photos" if photos else "synthetic_depth" if depth else "synthetic"),
             "device": "synthetic",
+            "simulated": True,
             "ref_space": "local-floor",
             "start_marker": {"p": [0, 0, 0], "q": [0, 0, 0, 1]},
             "created": "2026-10-24T10:00:00Z",
@@ -88,7 +206,8 @@ def main():
             "fan": {"rays": [[y, p] for p in PITCHES for y in YAWS], "origin": "viewer"},
         }
     ]
-    t, speed = 0.0, 0.5
+    t, speed = float(arg("--t0", 0)), 0.5
+    sway = float(arg("--sway", 0.25))  # rad: how much the user looks around
     wps = waypoints()
     for (x0, z0), (x1, z1) in zip(wps, wps[1:]):
         seg = math.hypot(x1 - x0, z1 - z0)
@@ -98,7 +217,7 @@ def main():
             s = i / steps
             px, pz = x0 + (x1 - x0) * s, z0 + (z1 - z0) * s
             py = 1.4 + 0.02 * math.sin(t * 6)  # walking bob
-            yaw = heading + 0.25 * math.sin(t * 0.9)  # looking around a bit
+            yaw = heading + sway * math.sin(t * 0.9)  # looking around a bit
             o = (px, py, pz)
             pts = []
             for p_deg in PITCHES:
@@ -124,15 +243,29 @@ def main():
             if depth:
                 # Like the real S23: plane hit-test only finds the floor; depth sees everything.
                 frame["pts"] = [h for h in pts if h[1] < 0.05]
-                frame["dpts"] = depth_samples(o, yaw, rng)
+                frame["dpts"] = depth_samples(o, yaw, rng, t)
             lines.append(frame)
+            if photos and (last_kf is None or math.hypot(px - last_kf[0], pz - last_kf[1]) >= KF_EVERY):
+                q = quat_yaw_pitch(yaw, KF_PITCH)
+                name = f"kf_{n_kf:04d}.png"
+                render_png(os.path.join(kf_dir, name), o, q)
+                lines.append({
+                    "type": "keyframe",
+                    "t": round(t, 3),
+                    "p": [round(px, 3), round(py, 3), round(pz, 3)],
+                    "q": [round(v, 5) for v in q],
+                    "intrinsics": {"fx": KF_F, "fy": KF_F, "cx": KF_W / 2, "cy": KF_H / 2, "w": KF_W, "h": KF_H},
+                    "img": name,
+                })
+                last_kf = (px, pz)
+                n_kf += 1
             t += 1 / HZ
     text = "".join(json.dumps(l, separators=(",", ":")) + "\n" for l in lines)
     if truncate:
         text = text[: -len(text.splitlines()[-1]) // 2 - 1]  # chop the last line mid-object
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
-    print(f"wrote {out}: {len(lines) - 1} frames")
+    print(f"wrote {out}: {len(lines) - 1} lines" + (f", {n_kf} photos in {kf_dir}" if photos else ""))
 
 
 if __name__ == "__main__":

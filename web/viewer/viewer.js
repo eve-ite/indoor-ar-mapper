@@ -3,6 +3,8 @@ import { parseScan } from '../common/jsonl.js';
 import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin } from '../common/grid.js';
 import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
 import { View3D } from './view3d.js';
+import { mergeMap } from '../common/chain.js';
+import { floorColors } from './floorcolor.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -16,7 +18,17 @@ const PROFILE_KEYS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'bodyRadiu
 const ROUTE_COLOR = '#facc15';
 const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 
-let scan = null; // { name, header, frames, skipped, stats }
+let scan = null; // { name, header, frames, keyframes, labels, skipped, serverId }
+let serverScans = []; // summaries from /api/scans (incl. continues/chain links, simulated)
+let serverMaps = []; // from /api/maps: [{ id, name, scans, links, simulated, updated }]
+let kind = 'real'; // 'real' | 'sim': real and simulated data are listed completely separately
+let currentMap = null; // the map being shown, or null for a single scan
+const texts = new Map(); // scan id -> JSONL text (cache)
+let labelKey = null; // server id whose viewer-added labels apply (the scan, or the map)
+let viewerLabels = []; // labels added in the viewer: [{ name, p: [x, y, z] }] in labelKey's coordinates
+let addingLabel = false;
+let kfImages = null; // Map "scan/img" -> ImageData, loaded once per scan/map for the photo floor
+let photoFloor = null; // RGBA per grid cell, or null
 let grid = null;
 let gridImage = null;
 let trav = null;
@@ -28,38 +40,84 @@ let route = { a: null, b: null, path: null, info: '' }; // a/b are world [x, z]
 let view = { s: 80, ox: 0, oy: 0 }; // px per meter, screen offset (CSS px)
 
 // ---- loading ----
-async function loadServerList() {
-  const box = $('scans');
+async function loadLists() {
   try {
-    const res = await fetch(`${SERVER}/api/scans`);
-    if (!res.ok) throw new Error(res.status);
-    const list = await res.json();
-    if (!list.length) {
-      box.textContent = 'none uploaded yet';
-      return;
-    }
-    box.replaceChildren(
-      ...list.map((s) => {
-        const b = document.createElement('button');
-        b.dataset.id = s.id;
-        b.innerHTML = `<div></div><div class="meta"></div>`;
-        b.firstChild.textContent = s.id;
-        b.lastChild.textContent = `${s.frames} frames · ${s.points} pts · ${s.created ? new Date(s.created).toLocaleString() : ''}`;
-        b.onclick = () => loadFromServer(s.id);
-        return b;
-      }),
-    );
+    const [scansRes, mapsRes] = await Promise.all([fetch(`${SERVER}/api/scans`), fetch(`${SERVER}/api/maps`)]);
+    if (!scansRes.ok) throw new Error(scansRes.status);
+    serverScans = await scansRes.json();
+    serverMaps = mapsRes.ok ? await mapsRes.json() : [];
   } catch {
-    box.textContent = 'server not reachable: drop a file instead';
+    $('scans').textContent = 'server not reachable: drop a file instead';
+    serverScans = serverMaps = [];
   }
+  renderLists();
 }
 
+const ofKind = (list) => list.filter((x) => !!x.simulated === (kind === 'sim'));
+
+function renderLists() {
+  for (const b of document.querySelectorAll('#kindTabs button')) b.classList.toggle('active', b.dataset.kind === kind);
+  // Map picker
+  const maps = ofKind(serverMaps);
+  $('mapSelect').replaceChildren(
+    ...(!maps.length
+      ? [Object.assign(document.createElement('option'), { value: '', textContent: 'no maps yet' })]
+      : !currentMap
+        ? [Object.assign(document.createElement('option'), { value: '', textContent: '— single scan —' })]
+        : []),
+    ...maps.map((m) =>
+      Object.assign(document.createElement('option'), {
+        value: m.id,
+        textContent: `${m.name} · ${m.scans.length} scan${m.scans.length > 1 ? 's' : ''}`,
+      }),
+    ),
+  );
+  if (currentMap && maps.some((m) => m.id === currentMap.id)) $('mapSelect').value = currentMap.id;
+  else if (!currentMap) $('mapSelect').value = '';
+  $('renameMap').disabled = !currentMap;
+  // Single scans
+  const box = $('scans');
+  const list = ofKind(serverScans);
+  if (!list.length) {
+    box.textContent = kind === 'sim' ? 'no simulated scans' : 'no real scans uploaded yet';
+    return;
+  }
+  box.replaceChildren(
+    ...list.map((sc) => {
+      const b = document.createElement('button');
+      b.dataset.id = sc.id;
+      b.innerHTML = `<div><span class="sid"></span> <span class="badge"></span></div><div class="meta"></div>`;
+      b.querySelector('.sid').textContent = sc.id;
+      const badge = b.querySelector('.badge');
+      badge.textContent = sc.simulated ? 'SIMULATED' : `REAL${sc.device && sc.device !== 'unknown' ? ' · ' + sc.device : ''}`;
+      badge.classList.add(sc.simulated ? 'sim' : 'real');
+      b.lastChild.textContent = `${sc.continues ? '↪ ' + sc.continues + ' · ' : ''}${sc.frames} frames · ${sc.points} pts · ${sc.created ? new Date(sc.created).toLocaleString() : ''}`;
+      b.classList.toggle('active', !currentMap && scan?.name === sc.id);
+      b.onclick = () => loadFromServer(sc.id);
+      return b;
+    }),
+  );
+}
+
+async function fetchText(id) {
+  if (!texts.has(id)) {
+    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
+    if (!res.ok) throw new Error(`${id}: ${res.status}`);
+    texts.set(id, await res.text());
+  }
+  return texts.get(id);
+}
+
+// One scan on its own (its own coordinates).
 async function loadFromServer(id) {
   try {
-    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(id)}`);
-    if (!res.ok) throw new Error(`${res.status}`);
-    setScan(id, await res.text());
-    document.querySelectorAll('#scans button').forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+    const text = await fetchText(id);
+    currentMap = null;
+    $('chain').hidden = true;
+    labelKey = id;
+    setScan(id, text, id);
+    loadViewerLabels();
+    renderLists();
   } catch (err) {
     $('err').textContent = `Could not load ${id}: ${err.message}`;
   }
@@ -67,25 +125,200 @@ async function loadFromServer(id) {
 
 function loadFile(file) {
   const reader = new FileReader();
-  reader.onload = () => setScan(file.name, reader.result);
+  reader.onload = () => {
+    labelKey = null; // local file: viewer labels can't be saved
+    viewerLabels = [];
+    setScan(file.name, reader.result);
+    renderLabels();
+    currentMap = null;
+    $('chain').hidden = true;
+    renderLists();
+  };
   reader.readAsText(file);
 }
 
-function setScan(name, text) {
+function setScan(name, text, serverId = null) {
+  setParsed(name, { ...parseScan(text), serverId });
+}
+
+// keepView: re-render in place (used while nudging a chain) instead of resetting route + camera.
+const isSimulated = (h) => !!h && (h.simulated || h.device === 'synthetic');
+
+function setParsed(name, parsed, { keepView = false } = {}) {
   $('err').textContent = '';
-  const parsed = parseScan(text);
+  const chip = $('dataKind');
+  const sim = isSimulated(parsed.header);
+  chip.hidden = !parsed.header;
+  chip.textContent = sim ? 'SIMULATED DATA' : `REAL SCAN${parsed.header?.device && parsed.header.device !== 'unknown' ? ' · ' + parsed.header.device : ''}`;
+  chip.className = sim ? 'sim' : 'real';
   if (!parsed.frames.length) {
     $('err').textContent = `${name}: no frames found${parsed.header ? '' : ' (and no header)'}`;
     return;
   }
-  scan = { name, ...parsed };
+  scan = { name, ...parsed }; // parsed.serverId is set for a single scan from the server
+  if (!keepView) {
+    kfImages = null;
+    photoFloor = null;
+    setupPhotos();
+  }
+  // keepView (nudging a map): same photos, new positions; rebuild() re-projects the photo floor.
+  else syncPhotos3d();
   detected = detectProfile(scan.frames);
-  route = { a: null, b: null, path: null, info: '' };
-  const r = (params.get('route') || '').split(',').map(Number); // ?route=ax,az,bx,bz
-  if (r.length === 4 && r.every(isFinite)) route = { a: [r[0], r[1]], b: [r[2], r[3]], path: null, info: '' };
+  if (!keepView) {
+    route = { a: null, b: null, path: null, info: '' };
+    const r = (params.get('route') || '').split(',').map(Number); // ?route=ax,az,bx,bz
+    if (r.length === 4 && r.every(isFinite)) route = { a: [r[0], r[1]], b: [r[2], r[3]], path: null, info: '' };
+  }
   applyProfile();
   rebuild();
-  fit();
+  if (!keepView) fit();
+  renderLabels();
+}
+
+// ---- scan chains: scans started where the previous one ended ----
+const NUDGE_KEY = 'iam-chain-nudges';
+const loadNudges = () => {
+  try {
+    return JSON.parse(localStorage.getItem(NUDGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+};
+const saveNudges = (n) => {
+  try {
+    localStorage.setItem(NUDGE_KEY, JSON.stringify(n));
+  } catch {}
+};
+
+// ---- maps: one location = one or more scans, placed by their "continues" links ----
+// keepView: re-render in place (nudging) instead of resetting the camera/route.
+async function openMap(id, { keepView = false } = {}) {
+  const m = serverMaps.find((x) => x.id === id);
+  if (!m) return;
+  currentMap = m;
+  $('mapNote').textContent = `loading ${m.scans.length} scan(s)…`;
+  const list = [];
+  for (const sid of m.scans) {
+    list.push(await fetchText(sid));
+    if (currentMap !== m) return; // another map/scan was opened meanwhile
+  }
+  const parsed = list.map(parseScan);
+  // Nudges saved in the scan files (continues_nudge) are the defaults; this browser's slider tweaks win.
+  const fileNudges = Object.fromEntries(parsed.filter((p) => p.header?.continues_nudge).map((p) => [p.header.session_id, p.header.continues_nudge]));
+  const nudges = { ...fileNudges, ...loadNudges() };
+  const merged = mergeMap(parsed, { refine: $('autoAlign').checked, nudges, links: m.links || {} });
+  setParsed(m.name, { header: parsed[0].header, frames: merged.frames, keyframes: merged.keyframes, labels: merged.labels, skipped: 0 }, { keepView });
+  if (labelKey !== m.id) {
+    labelKey = m.id; // viewer labels for a map live under the map's id, in its coordinates
+    loadViewerLabels();
+  }
+  $('mapNote').textContent = `${m.scans.length} scan(s) · last scanned ${new Date(m.updated).toLocaleString()}`;
+  // Alignment panel: one entry per link (scan continuing another)
+  $('chain').hidden = !merged.links.length;
+  if (merged.links.length) {
+    const keep = $('chainLink').value;
+    $('chainList').textContent = merged.links.map((l) => `${l.parent} → ${l.id}`).join('\n');
+    $('chainLink').replaceChildren(...merged.links.map((l) => Object.assign(document.createElement('option'), { value: l.id, textContent: `${l.parent} → ${l.id}` })));
+    if (merged.links.some((l) => l.id === keep)) $('chainLink').value = keep;
+    syncNudgeSliders();
+    const nudged = (sid) => (nudges[sid] && (nudges[sid].yawDeg || nudges[sid].dx || nudges[sid].dz) ? ' + manual nudge' : '');
+    $('chainInfo').textContent = merged.links
+      .map((l) => {
+        if (!l.refine) return `${l.id}: placed by floor mark${nudged(l.id)}`;
+        if (l.refine.used) {
+          const c = l.refine.correction;
+          return `${l.id}: auto-aligned (${c.yawDeg}°, ${c.dx} m, ${c.dz} m)${nudged(l.id)}`;
+        }
+        return `${l.id}: kept floor-mark placement (${l.refine.reason})${nudged(l.id)}`;
+      })
+      .join('\n');
+  }
+  renderLists();
+}
+
+function syncNudgeSliders() {
+  const id = $('chainLink').value;
+  const fromFile = texts.has(id) ? parseScan(texts.get(id)).header?.continues_nudge : null;
+  const n = loadNudges()[id] || fromFile || {};
+  for (const [k, def] of [['nudgeYaw', 'yawDeg'], ['nudgeDx', 'dx'], ['nudgeDz', 'dz']]) {
+    $(k).value = n[def] ?? 0;
+    $(`${k}V`).textContent = $(k).value;
+  }
+}
+
+let nudgeTimer = null;
+function onNudge() {
+  const all = loadNudges();
+  all[$('chainLink').value] = { yawDeg: +$('nudgeYaw').value, dx: +$('nudgeDx').value, dz: +$('nudgeDz').value };
+  saveNudges(all);
+  for (const k of ['nudgeYaw', 'nudgeDx', 'nudgeDz']) $(`${k}V`).textContent = $(k).value;
+  clearTimeout(nudgeTimer);
+  if (currentMap) nudgeTimer = setTimeout(() => openMap(currentMap.id, { keepView: true }).catch(showChainErr), 120);
+}
+
+const showChainErr = (err) => ($('chainInfo').textContent = `Couldn't build the map: ${err.message}`);
+
+// New map from existing scans (e.g. scanned before the app had map picking)
+function showNewMapForm() {
+  $('newMapForm').hidden = false;
+  $('newMapName').value = '';
+  const list = ofKind(serverScans).slice().sort((a, b) => ((a.created || '') < (b.created || '') ? -1 : 1));
+  $('newMapScans').replaceChildren(
+    ...list.map((sc) => {
+      const l = document.createElement('label');
+      l.innerHTML = '<input type="checkbox" /> <span></span>';
+      l.querySelector('input').value = sc.id;
+      l.querySelector('span').textContent = `${sc.id} · ${sc.created ? new Date(sc.created).toLocaleString() : ''}`;
+      return l;
+    }),
+  );
+  $('newMapName').focus();
+}
+
+async function createMap() {
+  const name = $('newMapName').value.trim();
+  const scans = [...document.querySelectorAll('#newMapScans input:checked')].map((i) => i.value);
+  if (!name || !scans.length) return ($('mapNote').textContent = 'Give the map a name and tick at least one scan.');
+  const res = await fetch(`${SERVER}/api/maps`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, scans, chain_in_order: $('newMapChain').checked }),
+  });
+  if (!res.ok) return ($('mapNote').textContent = `Couldn't create the map: ${await res.text()}`);
+  const { id } = await res.json();
+  $('newMapForm').hidden = true;
+  await loadLists();
+  openMap(id).catch(showChainErr);
+}
+
+async function renameMap() {
+  if (!currentMap) return;
+  const name = (prompt('Map name:', currentMap.name) || '').trim();
+  if (!name || name === currentMap.name) return;
+  const res = await fetch(`${SERVER}/api/maps/${encodeURIComponent(currentMap.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) return ($('mapNote').textContent = `Couldn't rename: ${await res.text()}`);
+  const id = currentMap.id;
+  await loadLists();
+  currentMap = serverMaps.find((m) => m.id === id) || currentMap;
+  if (scan) {
+    scan.name = name;
+    renderStats();
+  }
+  renderLists();
+}
+
+// Default view: ?scan= or ?map= if given, else the newest map of this kind, else its newest scan.
+async function openDefault() {
+  const maps = ofKind(serverMaps), scans = ofKind(serverScans);
+  if (maps.length) return openMap(maps[0].id);
+  if (scans.length) return loadFromServer(scans[0].id);
+  scan = null;
+  currentMap = null;
+  draw();
 }
 
 // ---- grid ----
@@ -112,9 +345,9 @@ function applyProfile() {
 function rebuild() {
   if (!scan) return;
   grid = buildGrid(scan.frames, opts());
-  gridImage = grid ? renderGridImage(grid) : null;
   trav = grid ? traversability(grid) : null;
-  travImage = trav ? renderTravImage(grid, trav) : null;
+  gridImage = travImage = null; // 2D debug images are built on demand (drawDebug), not in Map mode
+  if (photoFloor) recolorFloor(); // grid changed: re-project (images are cached)
   if (view3d && grid) view3d.setMap(grid, trav);
   computeRoute();
   renderStats();
@@ -294,9 +527,105 @@ function ensure3d() {
   if (!view3d) {
     view3d = new View3D($('view3d'), cssColor);
     view3d.onPick = (x, z) => addRoutePoint([x, z]);
+    view3d.setFloorPlan($('floorPlan').checked);
+    view3d.setFloorColors(photoFloor);
     if (grid) view3d.setMap(grid, trav);
+    view3d.setLabels(allLabels());
+    syncPhotos3d();
   }
   return view3d;
+}
+
+// ---- camera keyframes (textures branch) ----
+// A photo's own scan: maps tag every keyframe with the scan it came from (names repeat across scans).
+const kfScan = (kf) => kf.scan || scan?.serverId || null;
+const kfKey = (kf) => `${kfScan(kf)}/${kf.img}`;
+const kfUrl = (kf) => (kfScan(kf) ? `${SERVER}/api/scans/${encodeURIComponent(kfScan(kf))}/kf/${kf.img}` : null);
+
+function setupPhotos() {
+  const n = scan.keyframes?.length || 0;
+  $('photos').hidden = !n;
+  if (!n) {
+    view3d?.setKeyframes(null);
+    view3d?.setFloorColors(null);
+    return;
+  }
+  $('photoFloor').checked = false;
+  const loadable = scan.keyframes.some((kf) => kfScan(kf));
+  $('photoNote').textContent = loadable
+    ? `${n} photos${currentMap ? ' in this map' : ' in this scan'}`
+    : `${n} photos listed, but images only load for scans opened from the server list`;
+  $('photoFloor').disabled = !loadable;
+  const zip = $('nerfLink');
+  zip.hidden = !scan.serverId; // export is per scan (open a single scan to download it)
+  if (scan.serverId) zip.href = `${SERVER}/api/scans/${encodeURIComponent(scan.serverId)}/nerfstudio.zip`;
+  syncPhotos3d();
+}
+
+function syncPhotos3d() {
+  if (!view3d || !scan) return;
+  view3d.setKeyframes(scan.keyframes, kfUrl);
+  view3d.showKeyframes($('showPhotos').checked);
+}
+
+async function loadKfImages() {
+  if (kfImages) return kfImages;
+  const out = new Map();
+  let done = 0;
+  const queue = [...scan.keyframes];
+  const worker = async () => {
+    for (let kf = queue.shift(); kf; kf = queue.shift()) {
+      try {
+        const res = await fetch(kfUrl(kf));
+        if (!res.ok) throw new Error(res.status);
+        const bmp = await createImageBitmap(await res.blob());
+        const c = new OffscreenCanvas(bmp.width, bmp.height);
+        const cx = c.getContext('2d');
+        cx.drawImage(bmp, 0, 0);
+        out.set(kfKey(kf), cx.getImageData(0, 0, bmp.width, bmp.height));
+      } catch (err) {
+        console.warn('photo', kf.img, err);
+      }
+      $('photoNote').textContent = `loading photos ${++done}/${scan.keyframes.length}…`;
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  kfImages = out;
+  return out;
+}
+
+// Floor height at time t: the tracked floor of the nearest recorded frame.
+function floorAt(t) {
+  const f = scan.frames;
+  let lo = 0, hi = f.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (f[mid].t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return grid.floors[lo];
+}
+
+function recolorFloor() {
+  const t0 = performance.now();
+  const kfs = scan.keyframes.map((kf) => ({ ...kf, image: kfImages.get(kfKey(kf)) }));
+  photoFloor = floorColors(grid, trav, kfs, floorAt);
+  let n = 0;
+  for (let i = 3; i < photoFloor.length; i += 4) if (photoFloor[i]) n++;
+  $('photoNote').textContent = `floor coloured from ${kfImages.size} photos: ${(n * grid.cell * grid.cell).toFixed(1)} m² (${(performance.now() - t0).toFixed(0)} ms)`;
+  view3d?.setFloorColors(photoFloor);
+}
+
+async function togglePhotoFloor() {
+  if ($('photoFloor').checked) {
+    await loadKfImages();
+    recolorFloor();
+  } else {
+    photoFloor = null;
+    view3d?.setFloorColors(null);
+    $('photoNote').textContent = `${scan.keyframes.length} photos in this scan`;
+  }
+  if (view3d && grid) view3d.setMap(grid, trav);
 }
 
 // Route in world coords: string-pulled cell path, exact clicked endpoints (the tube smooths it).
@@ -315,6 +644,7 @@ function sync3dRoute() {
 
 function addRoutePoint(pt) {
   if (!grid) return;
+  if (addingLabel) return placeLabel(pt);
   if (!route.a || route.b) route = { a: pt, b: null, path: null, info: '' };
   else route.b = pt;
   computeRoute();
@@ -322,6 +652,8 @@ function addRoutePoint(pt) {
 }
 
 function drawDebug(r) {
+  if ($('mapMode').value === 'trav') travImage ??= trav && renderTravImage(grid, trav);
+  else gridImage ??= grid && renderGridImage(grid);
   const layerImage = $('mapMode').value === 'trav' ? travImage : gridImage;
   if ($('showGrid').checked && layerImage) {
     ctx.imageSmoothingEnabled = false;
@@ -359,6 +691,104 @@ function drawDebug(r) {
 
   drawRoute();
   drawStartMarker();
+  drawLabels2d();
+}
+
+// ---- room labels ----
+const allLabels = () => [
+  ...(scan?.labels || []).map((l) => ({ ...l, source: 'scan' })),
+  ...viewerLabels.map((l, i) => ({ ...l, source: 'viewer', index: i })),
+];
+
+async function loadViewerLabels() {
+  viewerLabels = [];
+  if (labelKey) {
+    try {
+      const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(labelKey)}/labels`);
+      if (res.ok) viewerLabels = await res.json();
+    } catch {}
+  }
+  renderLabels();
+}
+
+async function saveViewerLabels() {
+  if (!labelKey) return ($('labelNote').textContent = 'Labels on a dropped file are not saved (open it from the server list).');
+  try {
+    const res = await fetch(`${SERVER}/api/scans/${encodeURIComponent(labelKey)}/labels`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(viewerLabels),
+    });
+    if (!res.ok) throw new Error(res.status);
+  } catch (err) {
+    $('labelNote').textContent = `Couldn't save labels: ${err.message}`;
+  }
+}
+
+function placeLabel([x, z]) {
+  addingLabel = false;
+  $('addLabel').classList.remove('active');
+  const name = (prompt('Name for this spot (e.g. 2101, Judging room):') || '').trim();
+  if (!name) return;
+  viewerLabels.push({ name: name.slice(0, 80), p: [Math.round(x * 1000) / 1000, 0, Math.round(z * 1000) / 1000] });
+  renderLabels();
+  saveViewerLabels();
+}
+
+// Route from point A (if set) or the start marker to a label.
+function routeTo(l) {
+  const from = route.a && !route.b ? route.a : [0, 0];
+  route = { a: from, b: [l.p[0], l.p[2]], path: null, info: '' };
+  computeRoute();
+  draw();
+  if (route.path) $('routeInfo').textContent = `to ${l.name}: ${route.info}`;
+}
+
+function renderLabels() {
+  const list = allLabels();
+  view3d?.setLabels(list);
+  const box = $('labels');
+  box.replaceChildren(
+    ...list.map((l) => {
+      const row = document.createElement('div');
+      row.className = 'label-row';
+      const name = document.createElement('span');
+      name.textContent = l.name;
+      name.title = l.source === 'scan' ? 'labelled while scanning' : 'added in the viewer';
+      const go = Object.assign(document.createElement('button'), { textContent: 'Route here', type: 'button' });
+      go.onclick = () => routeTo(l);
+      row.append(name, go);
+      if (l.source === 'viewer') {
+        const del = Object.assign(document.createElement('button'), { textContent: '✕', type: 'button', title: 'Remove label' });
+        del.onclick = () => {
+          viewerLabels.splice(l.index, 1);
+          renderLabels();
+          saveViewerLabels();
+        };
+        row.append(del);
+      }
+      return row;
+    }),
+  );
+  if (!list.length) box.textContent = 'No rooms labelled yet.';
+  if (mode === 'debug') draw();
+}
+
+function drawLabels2d() {
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textBaseline = 'middle';
+  for (const l of allLabels()) {
+    const x = sx(l.p[0]), y = sy(l.p[2]);
+    const tw = ctx.measureText(l.name).width;
+    ctx.fillStyle = cssColor('--accent');
+    ctx.beginPath();
+    ctx.arc(x, y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(x + 7, y - 9, tw + 10, 18);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(l.name, x + 12, y + 0.5);
+  }
+  ctx.textBaseline = 'alphabetic';
 }
 
 // Heading arrow at the latest pose: rotate viewer forward (0,0,-1) by q, project to X/Z.
@@ -502,6 +932,25 @@ $('zoomIn').onclick = () => (mode === 'map' ? ensure3d().zoom(1.4) : zoomCenter(
 $('zoomOut').onclick = () => (mode === 'map' ? ensure3d().zoom(1 / 1.4) : zoomCenter(1 / 1.4));
 $('zoomFit').onclick = fit;
 $('topDown').onclick = () => ensure3d().topDown();
+$('addLabel').onclick = () => {
+  addingLabel = !addingLabel;
+  $('addLabel').classList.toggle('active', addingLabel);
+  $('labelNote').textContent = addingLabel ? 'Click the spot on the map (e.g. the doorway).' : '';
+};
+try {
+  $('floorPlan').checked = localStorage.getItem('iam-floor-plan') === '1';
+} catch {}
+$('floorPlan').onchange = () => {
+  try {
+    localStorage.setItem('iam-floor-plan', $('floorPlan').checked ? '1' : '0');
+  } catch {}
+  if (view3d) {
+    view3d.setFloorPlan($('floorPlan').checked);
+    if (grid) view3d.setMap(grid, trav);
+  }
+};
+$('showPhotos').onchange = () => view3d?.showKeyframes($('showPhotos').checked);
+$('photoFloor').onchange = () => togglePhotoFloor().catch((e) => ($('photoNote').textContent = e.message));
 
 // ---- Map / Debug mode (remembered) ----
 function setMode(m) {
@@ -551,14 +1000,37 @@ for (const k of SLIDERS) {
   });
 }
 for (const id of ['showGrid', 'showPts', 'showTraj', 'mapMode']) $(id).addEventListener('change', draw);
+for (const b of document.querySelectorAll('#kindTabs button')) {
+  b.onclick = () => {
+    if (kind === b.dataset.kind) return;
+    kind = b.dataset.kind;
+    currentMap = null;
+    renderLists();
+    openDefault().catch(showChainErr);
+  };
+}
+$('mapSelect').addEventListener('change', () => $('mapSelect').value && openMap($('mapSelect').value).catch(showChainErr));
+$('renameMap').onclick = () => renameMap().catch(showChainErr);
+$('newMap').onclick = showNewMapForm;
+$('newMapCancel').onclick = () => ($('newMapForm').hidden = true);
+$('newMapCreate').onclick = () => createMap().catch(showChainErr);
+$('autoAlign').addEventListener('change', () => currentMap && openMap(currentMap.id, { keepView: true }).catch(showChainErr));
+$('chainLink').addEventListener('change', syncNudgeSliders);
+for (const k of ['nudgeYaw', 'nudgeDx', 'nudgeDz']) $(k).addEventListener('input', onNudge);
+$('nudgeReset').addEventListener('click', () => {
+  const all = loadNudges();
+  delete all[$('chainLink').value];
+  saveNudges(all);
+  syncNudgeSliders();
+  if (currentMap) openMap(currentMap.id, { keepView: true }).catch(showChainErr);
+});
 $('profile').addEventListener('change', () => {
   applyProfile();
   rebuild();
 });
 window.addEventListener('resize', resize);
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  if (grid) gridImage = renderGridImage(grid);
-  if (trav) travImage = renderTravImage(grid, trav);
+  gridImage = travImage = null; // rebuilt in the new colours on the next debug draw
   if (view3d) {
     view3d.applyTheme();
     if (grid) view3d.setMap(grid, trav);
@@ -567,5 +1039,17 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () 
 });
 
 resize();
-loadServerList();
-if (params.get('scan')) loadFromServer(params.get('scan'));
+loadLists().then(() => {
+  const want = (x) => serverScans.find((sc) => sc.id === x) || serverMaps.find((m) => m.id === x);
+  if (params.get('map') && want(params.get('map'))) {
+    kind = serverMaps.find((m) => m.id === params.get('map')).simulated ? 'sim' : 'real';
+    renderLists();
+    return openMap(params.get('map'));
+  }
+  if (params.get('scan') && want(params.get('scan'))) {
+    kind = serverScans.find((sc) => sc.id === params.get('scan')).simulated ? 'sim' : 'real';
+    renderLists();
+    return loadFromServer(params.get('scan'));
+  }
+  return openDefault();
+});

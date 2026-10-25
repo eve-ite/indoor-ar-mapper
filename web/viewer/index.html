@@ -115,6 +115,23 @@
     .legend + .legend { margin-top: 4px; }
     #stats { font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: var(--muted); }
     #err { color: var(--bad); }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+    .tabs button { font: 600 13px system-ui, sans-serif; padding: 7px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+    .tabs button.active { background: var(--accent); color: #fff; }
+    .tabs button[data-kind="sim"].active { background: #b45309; }
+    .row-btns { display: flex; gap: 6px; margin: 4px 0 6px; }
+    #newMapForm { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 6px; }
+    #newMapName { width: 100%; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); margin-bottom: 6px; }
+    #newMapScans { max-height: 160px; overflow-y: auto; margin: 4px 0; }
+    #newMapScans label { display: flex; gap: 6px; font-size: 12px; align-items: center; }
+    .label-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-bottom: 4px; color: var(--fg); font-size: 13px; }
+    .label-row button, .small-btn { font: inherit; font-size: 12px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+    .small-btn.active { border-color: var(--accent); color: var(--accent); }
+    .badge { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 999px; vertical-align: 1px; }
+    .badge.real, #dataKind.real { background: #12917b; color: #fff; }
+    .badge.sim, #dataKind.sim { background: #b45309; color: #fff; }
+    #dataKind { position: absolute; left: 14px; top: 12px; z-index: 2; font: 700 12px system-ui, sans-serif; letter-spacing: 0.05em; padding: 5px 10px; border-radius: 999px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25); pointer-events: none; }
+    #nudgeReset { font: inherit; padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; margin-bottom: 6px; }
     main { position: relative; overflow: hidden; }
     canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
     #view3d { position: absolute; inset: 0; }
@@ -167,13 +184,61 @@
       <button data-mode="debug">Debug</button>
     </div>
     <section>
-      <h2>Scans on server</h2>
+      <div id="kindTabs" class="tabs">
+        <button data-kind="real" class="active" type="button">Real data</button>
+        <button data-kind="sim" type="button">Simulated</button>
+      </div>
+      <h2>Map</h2>
+      <select id="mapSelect"></select>
+      <div class="row-btns">
+        <button id="renameMap" class="small-btn" type="button">Rename</button>
+        <button id="newMap" class="small-btn" type="button">+ New map</button>
+      </div>
+      <div id="newMapForm" hidden>
+        <input id="newMapName" type="text" placeholder="Map name (e.g. Hall B)" />
+        <div class="note">Scans in this map, oldest first:</div>
+        <div id="newMapScans"></div>
+        <label class="check"><input id="newMapChain" type="checkbox" checked /> each scan continues the previous one</label>
+        <div class="row-btns">
+          <button id="newMapCreate" class="small-btn" type="button">Create</button>
+          <button id="newMapCancel" class="small-btn" type="button">Cancel</button>
+        </div>
+      </div>
+      <div id="mapNote" class="note"></div>
+    </section>
+    <section>
+      <h2>Single scans</h2>
       <div id="scans">loading…</div>
     </section>
     <section>
       <h2>Or a local file</h2>
       <div id="drop">Drop a .jsonl here or click to pick</div>
       <input id="file" type="file" accept=".jsonl,.json,.txt" hidden />
+    </section>
+    <section>
+      <h2>Rooms</h2>
+      <div id="labels" class="note">No rooms labelled yet.</div>
+      <button id="addLabel" class="small-btn" type="button">+ Add label</button>
+      <div id="labelNote" class="note"></div>
+    </section>
+    <section class="map-only">
+      <h2>View</h2>
+      <label class="check"><input id="floorPlan" type="checkbox" /> floor plan (walls only, hide furniture)</label>
+      <div class="note">Display only: routes still avoid furniture.</div>
+    </section>
+    <section id="chain" hidden>
+      <h2>Map alignment</h2>
+      <div id="chainList" class="note" style="white-space: pre-line"></div>
+      <label class="check"><input id="autoAlign" type="checkbox" /> auto-align overlaps (experimental)</label>
+      <select id="chainLink"></select>
+      <label class="slider">Nudge turn (°) <output id="nudgeYawV"></output>
+        <input id="nudgeYaw" type="range" min="-15" max="15" step="0.5" value="0" /></label>
+      <label class="slider">Nudge x (m) <output id="nudgeDxV"></output>
+        <input id="nudgeDx" type="range" min="-1" max="1" step="0.02" value="0" /></label>
+      <label class="slider">Nudge z (m) <output id="nudgeDzV"></output>
+        <input id="nudgeDz" type="range" min="-1" max="1" step="0.02" value="0" /></label>
+      <button id="nudgeReset" type="button">Reset nudge</button>
+      <div id="chainInfo" class="note" style="white-space: pre-line"></div>
     </section>
     <section>
       <h2>Profile</h2>
@@ -231,6 +296,13 @@
         <span><i style="background:#facc15"></i>test route</span>
       </div>
     </section>
+    <section id="photos" class="map-only" hidden>
+      <h2>Photos</h2>
+      <label class="check"><input id="showPhotos" type="checkbox" checked /> camera frustums + thumbnails</label>
+      <label class="check"><input id="photoFloor" type="checkbox" /> colour the floor from photos</label>
+      <div id="photoNote" class="note"></div>
+      <a id="nerfLink" class="note" href="#" download hidden>⬇ export for nerfstudio (transforms.json + images)</a>
+    </section>
     <section>
       <h2>Route</h2>
       <div id="routeInfo" class="note">click the map twice to test a route</div>
@@ -243,6 +315,7 @@
   </aside>
   <main>
     <canvas id="map"></canvas>
+    <div id="dataKind" hidden></div>
     <div id="view3d"></div>
     <div id="zoom">
       <button id="zoomIn" title="Zoom in">+</button>

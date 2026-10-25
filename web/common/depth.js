@@ -4,10 +4,12 @@ import { r3 } from './jsonl.js';
 
 // Normalized view coords, (0,0) = top-left. Rows sit in the lower half of the image so they
 // sweep from the horizon down to the floor.
-export const DEPTH_ROWS = [0.4, 0.5, 0.6, 0.7, 0.8];
+// 0.3 is just above the image centre: in a wide hallway the side walls are far away near the
+// edges of the view, and lower rows hit the floor before reaching them.
+export const DEPTH_ROWS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
 export const DEPTH_COLS = 16;
 export const DEPTH_MIN = 0.3; // m; closer readings are mostly the user's hand/body
-export const DEPTH_MAX = 5; // m; ARCore depth gets unreliable beyond this
+export const DEPTH_MAX = 8; // m; ARCore depth is usable (noisier) out here; wide-hallway walls are 6-8 m off diagonally
 
 // getDepthInMeters gives z-depth along the view's -Z axis, so a sample is unprojected with the
 // view's projection matrix P (column-major) and moved to world space by the view transform M.

@@ -95,3 +95,153 @@ Test without a phone:
 ```sh
 server/.venv/Scripts/python tools/make_synthetic.py scans/synthetic.jsonl   # then open /viewer/?scan=synthetic
 ```
+
+## Scan chaining (branch `scan-chaining`)
+
+Short scans that continue each other, so one long walk becomes several crash-proof pieces.
+
+1. **End a scan:** stop, put a small mark (tape/coin) on the floor under the phone, and note which
+   way you're facing (e.g. along a tile seam).
+2. **Next scan:** hold the phone over that mark, facing the same way, and tap **Continue from …**.
+   The header records `continues` (the previous session), `continues_end` (its last pose) and
+   `chain` (the first scan's id). The last pose is saved every ~2 s, so even a crashed scan can be
+   continued.
+3. **Viewer:** load any scan in the chain, then tick **combine chain into one map**. Each scan is
+   placed by matching its first pose to the previous scan's last pose (`web/common/chain.js`).
+   - **Nudge sliders** (turn / x / z, per link, remembered) fix a sloppy handover by eye: line up
+     doubled walls. A nudge can also be saved in the scan file itself as `continues_nudge`
+     ({yawDeg, dx, dz}); browser slider tweaks override it.
+   - **Auto-align (experimental)** matches obstacles between the scans. It's conservative: it
+     never moved a good placement in tests, but along long plain walls the overlap is ambiguous,
+     so it only partly fixes a sloppy one.
+
+Tests: `node tools/test_chain.mjs` (split a synthetic scan, re-place it with a 4°/15 cm handover
+error). Demo chain: `node tools/make_chain.mjs scans/synthetic_depth.jsonl scans/chain --err 4,0.15,-0.1`,
+then open `/viewer/?scan=chain_b&combine=1`.
+
+## Room labels, newest-scan-wins, floor plan (branch `scan-chaining`)
+
+- **Labels while scanning:** stand at the place (e.g. in the doorway), type the room name in the
+  box under Stop, and tap **Label here**. Recorded as `{"type":"label","t","name","p":[x,floorY,z]}`
+  at the phone's spot. Chained scans carry their labels into the combined map.
+- **Labels in the viewer:** the Rooms panel has **+ Add label** (click a spot, name it) and ✕ to
+  remove. They're saved to `scans/<id>_labels.json` (`GET/PUT /api/scans/{id}/labels`), in that
+  scan's coordinates, or the chain root's when combined. **Route here** routes from point A, or from
+  the start marker if no A is set.
+- **Newest wins** (`grid.js` keeps per-cell `obsT` / `clearT` / `walkedT`; `trav.js` decides):
+  - an obstacle is dropped when a ray passes through at the height it was seen, more than
+    `recencySlack` (15 s) later. Rays passing *under* a table don't count.
+  - an obstacle seen more than 15 s after you walked a spot blocks that walked corridor (e.g. a
+    table moved onto it).
+  - evidence from the same pass is never treated as a change.
+  - Test: `node tools/test_moved.mjs` (two synthetic visits, the table moved onto the first visit's
+    path).
+- **Floor plan** (Map view → View): structure only (`common/plan.js`). A wall is anything seen above
+  1 m, or a long thin run (≥ 2 m, mostly empty bounding box). It's drawn at a uniform 1.2 m on a
+  plain floor. **Display only:** routing still avoids furniture. From car height everything is low,
+  so only the long-thin rule applies there.
+
+## Not built yet: live re-routing during navigation (for the M5 nav app)
+
+Furniture moves after scanning. The nav app should notice obstacles on the route and re-plan,
+**without slowing the walker or taxing the phone**:
+- **Keep the AR frame loop light:** don't block rendering for sensing. People may walk fast; arrows
+  must stay smooth at 30–60 fps.
+- **Sense sparsely:** depth (if available) at **2 Hz** on a **small grid** (e.g. 8 × 3 samples, the
+  lower-middle of the view), or 3–5 hit-test rays straight ahead. Skip a sample when the previous one
+  is still being processed. Pause sensing entirely when the phone is pointed at the floor or sky.
+- **Only look ahead:** check only samples within ~4 m of the phone **and** within ~0.6 m of the
+  remaining route. Ignore everything else.
+- **Re-plan rarely and locally:** mark new obstacle cells in a small overlay (not a full grid
+  rebuild). Re-run A* only when the overlay intersects the next ~5 m of the route, at most **once
+  per second**, and on a window around the phone (cheap), then rejoin the global path.
+- **Forget:** overlay obstacles expire after ~60 s unless seen again (people walk past).
+- **Fail soft:** if sensing isn't available (no depth, few hits), just follow the precomputed
+  route. The map's newest-wins data plus the car's ultrasonic stop are the backstops.
+
+## Wide hallways, speed, real vs simulated (branch `scan-chaining`)
+
+- **Wide hallways:** the camera only sees about ±30° to each side, so walls beside you never enter
+  the picture while you walk straight.
+  - Depth now reaches **8 m** (was 5 m; ARCore's practical limit), with a sample row just above
+    the image centre. The grid keeps hits up to 9 m.
+  - The scan hint asks **"Glance left ↶" / "Glance right ↷"** when you're walking and nothing
+    has been seen on one side for 6 s.
+  - Synthetic test (walk straight down the middle; side walls mapped):
+
+    | Width | Old app | New 8 m range | + glancing |
+    |---|---|---|---|
+    | 6 m | 0% | 75% | 91% |
+    | 8 m | 0% | 0% | 89% |
+
+    Reproduce: `python tools/make_synthetic.py scans/hall.jsonl --depth --room -4,-20,4,1 --path hall --sway 0.7 --depth-max 8 --rows-up`.
+- **Viewer speed:** `close()` (mask clean-up) is now two chamfer passes instead of a disk loop: on
+  a 5 M-cell venue grid ~0.3 s instead of up to 2.6 s, with identical output
+  (`node tools/test_close.mjs`).
+  - The 3D view keeps the normal and floor-plan versions built (the other one is pre-built while
+    idle), so the floor-plan toggle is ~1 ms.
+  - 2D debug images are only built in Debug mode.
+  - The camera's clipping range is sized to the map, which fixes tilted big maps being cut off at
+    the far end.
+- **Real vs simulated:** the server marks scans with device `synthetic` (or `"simulated": true`,
+  which the generator now writes) as simulated. The viewer shows **REAL · device** or
+  **SIMULATED** badges in the scan list, and a chip on the map.
+
+## Maps (branch `scan-chaining`)
+
+A **map** is one location, made of one or more scans.
+
+- **Scan app:** Settings → **Map** picks the map, or **+ New map…** names one (e.g. "Hall B").
+  - Every scan records it in its header: `"map": {"id", "name"}`.
+  - **Continue** only offers to continue the last scan of the *same* map.
+  - With no map picked, a scan gets a new dated map automatically.
+- **Viewer:**
+  - **Real data | Simulated** tabs keep the two completely separate.
+  - The **Map** picker at the top opens a combined map; the newest real map opens by default.
+  - **Single scans** below show one scan on its own.
+  - **Rename** and **+ New map** (group existing scans, optionally "each continues the previous").
+  - **Map alignment** holds the per-link nudges and auto-align.
+  - URLs: `?map=<id>` or `?scan=<id>`.
+- **Placement** (`mergeMap` in `web/common/chain.js`):
+  - A scan that continues another in the map starts at that scan's end pose.
+  - Any other scan started on the map's start marker.
+  - Scans share one timeline from their `created` times, so "newest wins" sees the real gaps.
+- **Server** (`server/maps.py`): `GET /api/maps` merges three sources: maps declared by scans,
+  legacy chains (`chain-<root>`), and `scans/maps.json` (maps made in the viewer, plus renames).
+  `POST /api/maps` creates a map; `PUT /api/maps/{id}` renames or edits one.
+
+## Navigation (M5, branch `nav-m5`)
+
+`<tunnel>/nav/` (or `http://localhost:8000/nav/`). Pick a **map**, a **start mark** and where to **go**.
+
+- **Start marks:** the map's start marker (the tape L where its first scan began) and the **end of
+  every scan** (where a Continue scan would start). A mark within 2 m of a room label is named after
+  it. The default start is the newest scan's end.
+  - **Demo spot:** tape a mark there, scan from the map to the demo spot (Continue), and stop on the
+    mark. It's then a start mark that's already lined up with the rest of the map.
+- **Destinations:** room labels (from scans and the viewer), the start marks, or tap the 2D map to
+  drop a pin.
+- **2D preview / fallback:** route on a top-down map plus steps ("Walk 10 m, then turn slight
+  left"). Phones without WebXR AR (iPhones) get just this.
+- **AR:** stand on the start mark facing the way the scan faced, move the phone until the floor is
+  found, and tap **I'm on the mark**. The session is lined up with the map exactly like a Continue
+  scan (`sessionToMap` in `web/nav/navcore.js` uses the same maths as `mergeMap`). Then:
+  - chevrons on the floor for the next 12 m, a red goal pole, and a banner ("Turn left in 4 m")
+    whose arrow points at the route 2.5 m ahead;
+  - "Back to the arrows" when you're more than 1.5 m off; after 2.5 s off-route it re-plans from
+    where you are (full A*, at most every 3 s);
+  - **nudges**: turn the arrows ±2° or shift them ±20 cm if they don't line up with the corridor.
+- **Walks join the map** ("Add this walk to the map", on by default): the walk is recorded like a
+  scan (hit-test fan at 10 Hz; depth only with `?depth=1`) from the moment you tap I'm on the mark.
+  - From an end mark it's an ordinary Continue scan of that scan, with the nudge saved as
+    `continues_nudge`.
+  - From the map start marker it's written straight in map coordinates.
+  - Either way the header has `"nav": {mark, dest, coords}` and the map's id. It's saved on the
+    phone (same store as the scan app) and uploaded at Stop. Nav walks don't add start marks.
+  - `server/maps.py`: maps made in the viewer now also include later scans that name them.
+- URL: `?map=<id>&start=<mark id>&dest=<label name>` (for a QR code), `?sim=1` lists simulated maps,
+  `?profile=person|car`, `?depth=1`, `?device=S23`.
+- Tests: `node tools/test_nav.mjs` (lining up on every mark, walks joining the map, routing on the
+  real venue chain, turns) and `node tools/test_nav_ar.mjs` (three.js arrow maths).
+- **Not built yet:** live re-routing around moved furniture (see the section above), auto-align of
+  the live session to the map, and a minimap in AR.
