@@ -52,6 +52,7 @@ web/viewer/floorcolor.js floor coloured from photos (projection + occlusion)
 | **M4** car scan | Not started (needs the built car). |
 | **M5** navigation | Not started. A*, path smoothing and traversability already exist in `web/common/trav.js`, so it's mostly the AR side. |
 | **Textures** (bonus) | **Built on branch `textures-exploration`, not merged, not yet run on the S23.** Camera photos during scans (opt-in), photo frustums + photo-coloured floor in the viewer, nerfstudio export. Verified on synthetic scans only. See Textures below. |
+| **Scan chaining** | **Built on branch `scan-chaining`, not merged, not yet run on the S23.** A "Continue from last scan" button: start the next scan on a floor mark where the last one ended, facing the same way. The header records `continues`/`continues_end`/`chain`, and the last pose is saved every ~2 s, so crashed scans can be continued too. The viewer's Chain panel combines a chain into one map (`web/common/chain.js`), with per-link nudge sliders and an experimental auto-align. Branch README has details; `node tools/test_chain.mjs` passes. **The same branch also has:** room labels (in the scan app "Label here", in the viewer "+ Add label", and "Route here"), **newest-scan-wins** (moved furniture: obstacles a later pass saw through are dropped, and obstacles seen after a walk block that walked corridor; `node tools/test_moved.mjs` passes), and a display-only **floor plan** view (walls only, `common/plan.js`). The first real venue chain (4 scans, ~110 m) is stitched and nudged there. **Maps:** a map = one location. Scans record `"map": {id, name}` (picked in the scan app's Settings; Continue stays within a map). `mergeMap` places a map's scans by their continues links, or at the start marker, on a shared timeline. `server/maps.py` serves `/api/maps`. The viewer has Real/Simulated tabs, a Map picker at the top, Rename, and + New map. Also: depth range 8 m and a "Glance left/right" hint for wide hallways, and a faster viewer (`tools/test_close.mjs`). |
 
 ## Key decisions so far (don't undo these without asking)
 - **Networking:** cloudflared quick tunnel with `--protocol http2` (TCP 443; venues often block
@@ -111,9 +112,12 @@ since session start.
   `<tunnel>/camtest/` once so it caches, then test asynchronously.
 
 ## Car (M3)
-- **Board:** YD-ESP32-23 (ESP32-S3 N16R8, a DevKitC-1 clone), on the laptop's **COM11** (CH343 UART
-  port). arduino-cli (bundled with Arduino IDE 2) + esp32 core 3.3.12. FQBN:
-  `esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB`.
+- **Board:** YD-ESP32-23 (ESP32-S3 N16R8, a DevKitC-1 clone), now on the laptop's **COM12, the
+  native USB port**. Its CH343 COM/UART port (formerly COM11) stopped enumerating on 2026-10-24.
+  arduino-cli (bundled with Arduino IDE 2) + esp32 core 3.3.12. FQBN for the native port:
+  `esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc`
+  (drop `CDCOnBoot=cdc` on the UART port). The venue WiFi "Cal Hacks 13.0" is 5/6 GHz only, so the
+  2.4 GHz-only S3 can't join it; BLE is the car link.
 - **Hardware:** 2× 28BYJ-48 + ULN2003 (steppers), HC-SR04 (echo via 1k/2k divider), IR module,
   MPU6050. **`car/WIRING.md` is the wiring source of truth**; `car/firmware/car/config.h`
   mirrors it. Don't change pins.
@@ -147,7 +151,7 @@ Tests (no hardware needed):
   Phone page: `<tunnel>/camtest/`.
 
 Dev tools:
-- `uv run --with pyserial car/tools/serial_tail.py COM11 --seconds 5`
+- `uv run --with pyserial car/tools/serial_tail.py COM12 --seconds 5 --send show`
 - `uv run --with bleak car/tools/ble_probe.py echo|drive`
 
 ## Working in parallel (rules for agents)
@@ -158,7 +162,7 @@ Dev tools:
   - `server/main.py`: add routes only, via a separate module plus one include line.
   - `web/common/*`: shared by the viewer, scan app and (later) nav. Changes need the existing
     tests and screenshots to still pass.
-- **Hardware is single-user:** only one agent may use COM11 / flash the board at a time. Say so before
+- **Hardware is single-user:** only one agent may use the board's COM port (COM12) / flash the board at a time. Say so before
   you flash.
 - **Ports:** 8000 is the dev server. Tests use 8790/8791. **Windows reserves port 8765**, don't use it.
 - **Memory is tight on this laptop:** don't leave servers, tunnels or headless browsers running
@@ -178,11 +182,22 @@ Dev tools:
    merge. Next on the car: wire the motors and sensors (`car/WIRING.md` bring-up order), then M4.
 2. **M5 nav app** (`web/nav/`): load a scan, start on the start marker, run A* with
    `common/trav.js` (`astar`, `simplifyPath`), and draw three.js AR arrows along the path. Reuse the
-   scan app's WebXR session setup.
+   scan app's WebXR session setup. Destinations = room labels (`scan-chaining` branch).
+   **Live re-routing for moved furniture: keep it light.** People may walk fast, so the AR loop
+   must stay smooth.
+   - Sense sparsely: depth at ~2 Hz on a small grid, or 3–5 hit-test rays, skipping a sample while
+     the last one is still processing.
+   - Only care about samples within ~4 m ahead **and** ~0.6 m of the route.
+   - Put new obstacles in a small overlay (no grid rebuild) and re-plan A* only when the overlay hits
+     the next ~5 m, at most 1×/s, on a local window.
+   - Overlay obstacles expire after ~60 s.
+   - If sensing isn't available, just follow the precomputed route.
+   - Full note: the "Not built yet: live re-routing" section of the `scan-chaining` README.
 3. **iPhone fallback mode:** decide what iPhones get (e.g. 2D map plus route, no AR) and build it.
 4. **Judge QR flow:** a landing page, then pick scan / mount on car / navigate.
 5. **Merge/align multiple scans** that share the start marker, so they combine into one map in
-   the viewer.
+   the viewer. *Partly covered by `scan-chaining` (scans that continue each other). Scans that
+   start on the same marker could reuse `mergeChain` with an identity link.*
 6. **Hosting:** static pages on GitHub/Cloudflare Pages plus a hosted API (`?server=` and CORS
    already work).
 7. **Car WiFi mode test** on a normal 2.4 GHz network (user will do this off-site).

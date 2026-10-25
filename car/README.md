@@ -81,14 +81,24 @@ the venue only has those, ask the organizers for a device/IoT network.
    - Flash Size **16MB (128Mb)**
    - PSRAM **OPI PSRAM**
    - Partition Scheme **16M Flash (3MB APP/9.9MB FATFS)** (TLS + WiFi make the app ~1.1 MB; the default 1.2 MB app slot is 84% full)
-   - plug in the DevKitC's **"COM"/"UART" USB port** and pick that port
+   - **Which USB port:**
+     - **"COM"/"UART" port (CH343):** USB CDC On Boot **Disabled**.
+     - **Native "USB" port:** USB CDC On Boot **Enabled**, or `Serial` goes to the UART pins and
+       you see nothing.
+   - **Our board right now:** its COM/UART port stopped enumerating (2026-10-24), so it runs on
+     the **native port, COM12, CDC On Boot Enabled**. If an upload there fails, hold BOOT, tap
+     RST, release BOOT, then retry.
 5. Upload, then open the Serial Monitor at **115200**. You should see the MPU6050 status, the
-   config, then `[ws] connected`.
+   link, then `advertising as "mapper-car"` (BLE) or `[ws] connected` (WiFi). Type `show` for
+   the current status.
 
 Command line (what the repo was checked with):
 
 ```sh
-arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB car/firmware/car
+# native USB port (current board)
+arduino-cli compile --upload -p COM12 --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc car/firmware/car
+# COM/UART (CH343) port
+arduino-cli compile --upload -p COM11 --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB car/firmware/car
 ```
 
 ## Run it
@@ -108,10 +118,10 @@ Then open `http://localhost:8000/teleop/` on the laptop (or `<tunnel>/teleop/` o
 **Status pills:** they show whether the server and the car are connected, and "car silent" means
 telemetry has stopped arriving.
 
-## Dev tools (board on COM11)
+## Dev tools (board on COM12 = native USB now; COM11 = the CH343 port)
 
 ```sh
-uv run --with pyserial car/tools/serial_tail.py COM11 --seconds 10 [--reset]   # serial log
+uv run --with pyserial car/tools/serial_tail.py COM12 --seconds 10 --send show  # serial log (on native USB, --reset re-enumerates)
 uv run --with bleak car/tools/ble_services.py                                # GATT table
 uv run --with bleak car/tools/ble_probe.py echo                              # with bringup_ble_echo
 uv run --with bleak car/tools/ble_probe.py drive --end silent|disconnect     # deadman tests
@@ -120,7 +130,7 @@ uv run --with bleak car/tools/ble_probe.py drive --end silent|disconnect     # d
 - **`bringup_hello`** prints chip info.
 - **`bringup_ble_echo`** echoes lines back. Pair it with `/teleop/ble-test.html` in Chrome.
 
-Only one program can open COM11 at a time (close the Arduino serial monitor first). If the
+Only one program can open the board's COM port at a time (close the Arduino serial monitor first). If the
 car stops advertising after a test, a central is still holding it: close other BLE pages, or
 reset the board with `--reset`.
 
