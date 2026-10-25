@@ -52,6 +52,7 @@ export class View3D {
     new ResizeObserver(() => this.resize()).observe(container);
     this.resize();
     const tick = () => {
+      if (this.anim) this.stepAnim();
       if (this.controls.update()) this.render();
       requestAnimationFrame(tick);
     };
@@ -346,6 +347,71 @@ export class View3D {
       this.photoGroup.add(g);
     }
     this.render();
+  }
+
+  // ---- photo walk ----
+  // Highlight one photo: a big frustum in the pin colour, a floor disc and a heading arrow.
+  highlightKeyframe(kf) {
+    if (!this.walkGroup) {
+      this.walkGroup = new THREE.Group();
+      this.scene.add(this.walkGroup);
+    }
+    this.clear(this.walkGroup);
+    if (!kf) return this.render();
+    const col = this.color('--map-pin');
+    const K = kf.intrinsics, D = 0.5;
+    const hw = (K.w / 2 / K.fx) * D, hh = (K.h / 2 / K.fy) * D;
+    const ox = ((K.w / 2 - K.cx) / K.fx) * D, oy = ((K.cy - K.h / 2) / K.fy) * D;
+    const c = [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]].map(([x, y]) => new THREE.Vector3(x + ox, y + oy, -D));
+    const o = new THREE.Vector3();
+    const fr = new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints([o, c[0], o, c[1], o, c[2], o, c[3], c[0], c[1], c[1], c[2], c[2], c[3], c[3], c[0]]),
+      new THREE.LineBasicMaterial({ color: col, depthTest: false }),
+    );
+    fr.renderOrder = 5;
+    fr.matrixAutoUpdate = false;
+    fr.matrix.fromArray(poseMatrix(kf.p, kf.q));
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(0.28, 32), new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.85 }));
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.set(kf.p[0], 0.03, kf.p[2]);
+    // Heading arrow on the floor, pointing where the photo looks.
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(new THREE.Quaternion(...kf.q));
+    fwd.y = 0;
+    fwd.normalize();
+    const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.45, 3), new THREE.MeshBasicMaterial({ color: col }));
+    arrow.position.set(kf.p[0] + fwd.x * 0.5, 0.05, kf.p[2] + fwd.z * 0.5);
+    arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), fwd);
+    this.walkGroup.add(fr, disc, arrow);
+    this.render();
+  }
+
+  // Glide to a chase view: behind and above the photo's position, looking where it looks.
+  followPose(p, q, { back = 5, up = 4.2 } = {}) {
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(new THREE.Quaternion(...q));
+    fwd.y = 0;
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1);
+    fwd.normalize();
+    const target = new THREE.Vector3(p[0], 0.6, p[2]).addScaledVector(fwd, 2.5);
+    const pos = new THREE.Vector3(p[0], up, p[2]).addScaledVector(fwd, -back);
+    this.anim = {
+      t0: performance.now(),
+      dur: 450,
+      fromPos: this.camera.position.clone(),
+      fromTarget: this.controls.target.clone(),
+      pos,
+      target,
+    };
+  }
+
+  stepAnim() {
+    const a = this.anim;
+    const k = Math.min(1, (performance.now() - a.t0) / a.dur);
+    const e = k * k * (3 - 2 * k);
+    this.camera.position.lerpVectors(a.fromPos, a.pos, e);
+    this.controls.target.lerpVectors(a.fromTarget, a.target, e);
+    this.controls.update();
+    this.render();
+    if (k >= 1) this.anim = null;
   }
 
   showKeyframes(on) {
