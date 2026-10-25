@@ -143,6 +143,16 @@ async def run():
         t = d.last()
         check("turning moves wheels opposite ways", t["mock"]["theta"] > 0.02, f"theta {t['mock']['theta']} rad")
 
+        # 1b. Live top-speed tuning reaches the car (and back again).
+        t_set = time.time()
+        await d.ws.send(json.dumps({"type": "set", "max_step_rate": 250}))
+        got = mock.first("set", t_set)
+        await asyncio.sleep(0.3)
+        check("set max_step_rate reaches the car", got is not None and d.last().get("max_step_rate") == 250,
+              f"telemetry max_step_rate={d.last().get('max_step_rate')}")
+        await d.ws.send(json.dumps({"type": "set", "max_step_rate": 400}))
+        await asyncio.sleep(0.3)
+
         # 2. Driving browser closes -> stop.
         await d.drive(1.0, 0.0, 0.5)
         t_close = time.time()

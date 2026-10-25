@@ -57,14 +57,15 @@ static portMUX_TYPE shareMux = portMUX_INITIALIZER_UNLOCKED;
 static Command sharedCmd;
 static Sensors sharedSensors;
 static volatile bool linkUp = false;
+static volatile float maxStepRate = MAX_STEP_RATE;  // live-tunable top speed (steps/s), saved in NVS
 static BleLink ble;
 
 void startNetwork();
 
 // ---------------------------------------------------------------- core 1: motion + sensors
-// HALF4WIRE with the IN1, IN3, IN2, IN4 order is the usual 28BYJ-48 / ULN2003 wiring.
-static AccelStepper leftMotor(AccelStepper::HALF4WIRE, LEFT_IN1, LEFT_IN3, LEFT_IN2, LEFT_IN4);
-static AccelStepper rightMotor(AccelStepper::HALF4WIRE, RIGHT_IN1, RIGHT_IN3, RIGHT_IN2, RIGHT_IN4);
+// IN1, IN3, IN2, IN4 is the right order for the 28BYJ-48 / ULN2003 in both full and half step.
+static AccelStepper leftMotor(STEP_INTERFACE, LEFT_IN1, LEFT_IN3, LEFT_IN2, LEFT_IN4);
+static AccelStepper rightMotor(STEP_INTERFACE, RIGHT_IN1, RIGHT_IN3, RIGHT_IN2, RIGHT_IN4);
 static float leftRate = 0, rightRate = 0;  // current step rates, + = forward
 static bool coilsOn = false;
 static bool wasMoving = false;
@@ -157,7 +158,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(US_ECHO), onEcho, CHANGE);
 
   for (AccelStepper* m : {&leftMotor, &rightMotor}) {
-    m->setMaxSpeed(MAX_STEP_RATE);
+    m->setMaxSpeed(MAX_STEP_RATE_LIMIT);  // the real cap is maxStepRate, applied in the mix
     m->setSpeed(0);
   }
   coilsOn = true;  // AccelStepper starts with outputs enabled; turn them off until we drive
@@ -202,10 +203,11 @@ void loop() {
   bool blocked = v > 0 && blockForward;
   if (blocked) v = 0;  // turning and reverse stay allowed
 
-  // Differential mix, scaled so neither wheel exceeds MAX_STEP_RATE.
+  // Differential mix, scaled so neither wheel exceeds the current max step rate.
   float l = v - w, r = v + w;
   float k = fmaxf(1.0f, fmaxf(fabsf(l), fabsf(r)));
-  float lt = MAX_STEP_RATE * l / k, rt = MAX_STEP_RATE * r / k;
+  float rate = maxStepRate;
+  float lt = rate * l / k, rt = rate * r / k;
   leftRate = approach(leftRate, lt, ACCEL_STEPS * dt);
   rightRate = approach(rightRate, rt, ACCEL_STEPS * dt);
 
@@ -257,6 +259,15 @@ static void stopCommand() {
 static void handleMessage(const char* text, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, text, length)) return;
+  if (doc["type"] == "set") {  // live tuning, e.g. {"type":"set","max_step_rate":500}; saved to flash
+    if (doc["max_step_rate"].is<float>()) {
+      float r = constrain(doc["max_step_rate"].as<float>(), 50.0f, MAX_STEP_RATE_LIMIT);
+      maxStepRate = r;
+      prefs.putFloat("rate", r);
+      Serial.printf("%8lu [set] max_step_rate=%.0f steps/s (%s step)\n", millis(), r, FULL_STEP ? "full" : "half");
+    }
+    return;
+  }
   if (doc["type"] != "drive") return;
   float v = constrain(doc["v"] | 0.0f, -1.0f, 1.0f);
   float w = constrain(doc["w"] | 0.0f, -1.0f, 1.0f);
@@ -341,6 +352,8 @@ static void sendTelemetry() {
   doc["uptime_ms"] = millis();
   doc["blocked"] = s.blocked;
   doc["seq"] = seq;
+  doc["max_step_rate"] = (int)maxStepRate;
+  doc["steps_per_rev"] = STEPS_PER_REV;
   String out;
   serializeJson(doc, out);
   if (CONTROL_LINK == LINK_BLE) ble.sendLine(out);
@@ -394,6 +407,7 @@ static void loadConfig() {
   cfgHost = prefs.getString("host", SERVER_HOST);
   cfgPort = prefs.getUShort("port", SERVER_PORT);
   cfgTls = prefs.getBool("tls", SERVER_TLS);
+  maxStepRate = constrain(prefs.getFloat("rate", MAX_STEP_RATE), 50.0f, MAX_STEP_RATE_LIMIT);
 }
 
 static void printConfig() {

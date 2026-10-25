@@ -24,7 +24,7 @@ import time
 import websockets
 
 # Mirrors car/firmware/car/config.h. SI units internally.
-STEPS_PER_REV = 4096  # 28BYJ-48 in half-step mode (gearbox ~1:64)
+STEPS_PER_REV = 2048  # 28BYJ-48 in full-step mode (gearbox ~1:64), as config.h FULL_STEP
 WHEEL_DIAMETER_M = 0.065
 TRACK_WIDTH_M = 0.12
 MAX_STEP_RATE = 400.0  # steps/s; our motors: 200 works, 800 skips (see config.h)
@@ -55,6 +55,7 @@ class Car:
         self.moving = False
         self.blocked = False
         self.near = False  # something within the block distance (with hysteresis)
+        self.max_rate = MAX_STEP_RATE  # live-tunable via {"type":"set","max_step_rate":N}
         self.yaw_rate = 0.0
         self.t0 = time.monotonic()
 
@@ -107,7 +108,7 @@ class Car:
         # Differential mix, scaled so neither wheel exceeds 1.
         left, right = v - self.w, v + self.w
         k = max(1.0, abs(left), abs(right))
-        self.left_rate, self.right_rate = MAX_STEP_RATE * left / k, MAX_STEP_RATE * right / k
+        self.left_rate, self.right_rate = self.max_rate * left / k, self.max_rate * right / k
         moving = abs(self.left_rate) > 0 or abs(self.right_rate) > 0
         if moving and not self.enabled:
             self.enabled = True
@@ -138,6 +139,8 @@ class Car:
             "uptime_ms": int((time.monotonic() - self.t0) * 1000),
             "blocked": self.blocked,
             "us": "ok" if self.ultrasonic() < 4.0 else "clear",
+            "max_step_rate": int(self.max_rate),
+            "steps_per_rev": STEPS_PER_REV,
             "mock": {"x": round(self.x, 4), "y": round(self.y, 4), "theta": round(self.theta, 4), "moving": self.moving},
         }
 
@@ -168,7 +171,10 @@ async def session(car: Car, url: str) -> None:
                     msg = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                if msg.get("type") == "drive":
+                if msg.get("type") == "set" and "max_step_rate" in msg:
+                    car.max_rate = max(50.0, min(1200.0, float(msg["max_step_rate"])))
+                    emit("set", max_step_rate=car.max_rate)
+                elif msg.get("type") == "drive":
                     v, w = float(msg.get("v", 0)), float(msg.get("w", 0))
                     if v == 0 and w == 0:
                         car.stop("command")

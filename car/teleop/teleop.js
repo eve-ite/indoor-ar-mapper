@@ -93,6 +93,15 @@ $('bleBtn').addEventListener('click', async () => {
   renderPills();
 });
 
+// Live top-speed tuning: the car clamps it to 50..1200 and remembers it.
+$('rateBtn').addEventListener('click', () => {
+  const r = parseFloat($('rate').value);
+  if (!(r > 0)) return;
+  const line = JSON.stringify({ type: 'set', max_step_rate: r });
+  if (ble.connected) ble.send(line);
+  else if (ws?.readyState === WebSocket.OPEN) ws.send(line);
+});
+
 function send(v, w) {
   const line = JSON.stringify({ type: 'drive', v: round(v), w: round(w), seq: ++seq });
   if (ble.connected) ble.send(line);
@@ -208,6 +217,11 @@ function renderPills() {
 setInterval(renderPills, 500);
 
 function renderTelemetry(t) {
+  if (t.max_step_rate != null) {
+    const mps = t.steps_per_rev ? (t.max_step_rate / t.steps_per_rev) * Math.PI * 0.065 : null;
+    $('rateNow').textContent = `car: ${t.max_step_rate} steps/s${mps ? ` ≈ ${(mps * 100).toFixed(1)} cm/s` : ''}`;
+    if (!$('rate').value) $('rate').value = t.max_step_rate;
+  }
   const blocked = t.blocked ?? t.dist_cm < 15;
   // us: "ok" (distance), "clear" (nothing in range), "no_echo" (sensor missing: no forward protection)
   $('dist').textContent =

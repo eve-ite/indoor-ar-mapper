@@ -6,8 +6,8 @@
 
 #include "../car/config.h"
 
-AccelStepper left(AccelStepper::HALF4WIRE, LEFT_IN1, LEFT_IN3, LEFT_IN2, LEFT_IN4);
-AccelStepper right(AccelStepper::HALF4WIRE, RIGHT_IN1, RIGHT_IN3, RIGHT_IN2, RIGHT_IN4);
+AccelStepper left(STEP_INTERFACE, LEFT_IN1, LEFT_IN3, LEFT_IN2, LEFT_IN4);
+AccelStepper right(STEP_INTERFACE, RIGHT_IN1, RIGHT_IN3, RIGHT_IN2, RIGHT_IN4);
 
 AccelStepper* motors[] = {&left, &right};
 const int dirs[] = {LEFT_DIR, RIGHT_DIR};

@@ -117,6 +117,10 @@ async def drive_endpoint(ws: WebSocket):
                 msg = json.loads(text)
             except json.JSONDecodeError:
                 continue
+            if isinstance(msg, dict) and msg.get("type") == "set" and relay.car is not None:
+                # Live tuning (e.g. max_step_rate): forwarded as-is; the car clamps the values.
+                await relay.car.send_text(json.dumps(msg))
+                continue
             if not isinstance(msg, dict) or msg.get("type") != "drive":
                 continue
             relay.last_driver = ws

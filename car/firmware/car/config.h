@@ -42,14 +42,24 @@
 #define MPU_ADDR 0x68  // 0x69 if AD0 is tied high
 
 // ---- Drive ----
-// 28BYJ-48: ~1:64 gearbox, 4096 half-steps per output revolution (nominal; real ~4076).
-// It skips steps / stalls if pushed much above ~1000 half-steps/s at 5 V, and torque drops
-// fast with speed. Raise MAX_STEP_RATE only after testing on the floor with the phone on board.
+// 28BYJ-48: ~1:64 gearbox. Step modes (AccelStepper, same IN1, IN3, IN2, IN4 pin order):
+//   full-step (two coils on):  2048 steps/rev, more torque per step, ~2x speed at the same rate
+//   half-step:                 4096 steps/rev, smoother but half the speed at the same rate
+// Bench (half-step): 200 steps/s worked, 800 skipped. Full-step at 400 steps/s = 2x that speed.
+#define FULL_STEP true
+#if FULL_STEP
+#define STEP_INTERFACE AccelStepper::FULL4WIRE
+#define STEPS_PER_REV 2048
+#else
+#define STEP_INTERFACE AccelStepper::HALF4WIRE
 #define STEPS_PER_REV 4096
-// Bench test on our motors: 200 half-steps/s works, 800 skips. Start at 400 and only raise it
-// after a floor test with the phone mounted.
-#define MAX_STEP_RATE 400.0f  // half-steps/s at |v|+|w| = 1  (~0.02 m/s with 65 mm wheels)
-#define ACCEL_STEPS 1000.0f   // half-steps/s^2 when speeding up (0 -> 400 in 0.4 s); stops are immediate
+#endif
+// Default top speed, in steps/s of the chosen mode, at |v|+|w| = 1 (full-step 400 = ~0.04 m/s with
+// 65 mm wheels). Tunable live from the teleop page ({"type":"set","max_step_rate":N}); the value is
+// saved on the car. Raise it until the wheels start skipping under load, then back off ~20%.
+#define MAX_STEP_RATE 400.0f
+#define MAX_STEP_RATE_LIMIT 1200.0f  // hard cap for the live setting
+#define ACCEL_STEPS 800.0f           // steps/s^2 when speeding up (0 -> 400 in 0.5 s); stops are immediate
 #define WHEEL_DIAMETER_M 0.065f
 #define TRACK_WIDTH_M 0.12f
 
