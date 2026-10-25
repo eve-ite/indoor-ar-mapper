@@ -120,8 +120,21 @@ Do one step at a time, and only move on once it works. Each sketch lives in `fir
    `bringup_stepper`: the left wheel turns one revolution "forward", then back. If it only buzzes,
    re-check the IN1–IN4 order. Then wire the right one (IN 15–18) and watch it do the same. If a
    wheel goes backwards on the "forward" leg, flip its `*_DIR` in `config.h`.
-6. **Full firmware, wheels still in the air.** Create `secrets.h`, flash `car`, start the server
-   (and tunnel), open `/teleop`, and drive. Check that STOP, letting go of the keys and closing
-   the tab all stop it, and that a hand under 15 cm in front blocks forward.
-7. **On the floor**, phone mounted, ESP32 back on its power bank port, at a low speed (use the
-   teleop speed slider). Raise `MAX_STEP_RATE` in `config.h` only if the wheels don't skip.
+6. **Full firmware over Bluetooth, wheels still in the air.**
+   - Flash `car`. It's in BLE mode by default (`CONTROL_LINK LINK_BLE`). `secrets.h` only needs
+     to exist, copied from the example; nothing in it is used in BLE mode.
+   - On the laptop, start the server (`cd server && uv run uvicorn main:app --port 8000`). It
+     only serves the page: no tunnel or WiFi involved.
+   - Open `http://localhost:8000/teleop/` in **Chrome or Edge** (not Brave), click **Connect
+     Bluetooth**, and pick **mapper-car**.
+   - Drive, and check:
+     - STOP, letting go of the keys and closing the tab all stop it.
+     - A hand under 15 cm in front blocks forward.
+     - The ultrasonic box shows a distance, or "clear (>4 m)". If it says **NO ECHO**, the sensor
+       is miswired and forward has no obstacle protection.
+   - The WiFi flow (`secrets.h` + tunnel) is only for `CONTROL_LINK LINK_WIFI`. The venue WiFi
+     is 5/6 GHz only, so BLE is the venue link.
+7. **On the floor**, phone mounted, ESP32 back on its power bank port. `MAX_STEP_RATE` starts at
+   **400** half-steps/s (~2 cm/s): on the bench, 200 works and 800 skips. Use the teleop speed
+   slider to go slower. Raise `MAX_STEP_RATE` in `config.h` only in small steps, and only if
+   the wheels don't skip with the full weight on them.

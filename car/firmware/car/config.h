@@ -46,8 +46,10 @@
 // It skips steps / stalls if pushed much above ~1000 half-steps/s at 5 V, and torque drops
 // fast with speed. Raise MAX_STEP_RATE only after testing on the floor with the phone on board.
 #define STEPS_PER_REV 4096
-#define MAX_STEP_RATE 900.0f  // half-steps/s at |v|+|w| = 1  (~0.045 m/s with 65 mm wheels)
-#define ACCEL_STEPS 3000.0f   // half-steps/s^2 when speeding up; stops are immediate
+// Bench test on our motors: 200 half-steps/s works, 800 skips. Start at 400 and only raise it
+// after a floor test with the phone mounted.
+#define MAX_STEP_RATE 400.0f  // half-steps/s at |v|+|w| = 1  (~0.02 m/s with 65 mm wheels)
+#define ACCEL_STEPS 1000.0f   // half-steps/s^2 when speeding up (0 -> 400 in 0.4 s); stops are immediate
 #define WHEEL_DIAMETER_M 0.065f
 #define TRACK_WIDTH_M 0.12f
 
@@ -55,8 +57,14 @@
 #define DEADMAN_MS 300            // no drive command for this long -> stop, coils off
 #define BLOCK_DIST_M 0.15f        // forward blocked when the ultrasonic reads closer than this
 #define BLOCK_HYST_M 0.03f        // ...and stays blocked until it reads farther than BLOCK+HYST
-#define US_FAULT_MS 500           // no valid ultrasonic reading this long = sensor fault
-#define US_FAULT_BLOCKS_FORWARD true  // fail safe: no distance -> no forward
+// Ultrasonic states (reported as telemetry "us"):
+//   "ok"       a distance in range: forward blocked under BLOCK_DIST_M
+//   "clear"    echo timed out / HC-SR04's long "nothing in range" pulse: treated as clear
+//   "no_echo"  no echo pulse at all for US_FAULT_MS (sensor unplugged/miswired)
+// Trade-off: with US_FAULT_BLOCKS_FORWARD false, an unplugged sensor means forward has NO
+// obstacle protection (teleop shows a warning). Set it true to refuse forward in that case.
+#define US_FAULT_MS 500
+#define US_FAULT_BLOCKS_FORWARD false
 #define IR_BLOCKS_FORWARD false   // set true to also block forward while the IR sees something
 
 // ---- Timing ----

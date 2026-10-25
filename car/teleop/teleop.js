@@ -209,8 +209,10 @@ setInterval(renderPills, 500);
 
 function renderTelemetry(t) {
   const blocked = t.blocked ?? t.dist_cm < 15;
-  $('dist').textContent = t.dist_cm == null ? '–' : `${t.dist_cm.toFixed(1)} cm`;
-  $('distBox').classList.toggle('bad', !!blocked);
+  // us: "ok" (distance), "clear" (nothing in range), "no_echo" (sensor missing: no forward protection)
+  $('dist').textContent =
+    t.dist_cm != null ? `${t.dist_cm.toFixed(1)} cm` : t.us === 'clear' ? 'clear (>4 m)' : t.us === 'no_echo' ? 'NO ECHO: check sensor' : '–';
+  $('distBox').classList.toggle('bad', !!blocked || t.us === 'no_echo');
   $('ir').textContent = t.ir_blocked ? 'blocked' : 'clear';
   $('irBox').classList.toggle('bad', !!t.ir_blocked);
   $('ls').textContent = t.left_steps;

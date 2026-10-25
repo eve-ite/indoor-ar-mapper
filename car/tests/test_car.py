@@ -137,7 +137,7 @@ async def run():
         await asyncio.sleep(0.15)
         after = d.last()
         dl, dr = after["left_steps"] - before["left_steps"], after["right_steps"] - before["right_steps"]
-        check("drive forward moves both wheels", dl > 500 and dr > 500, f"left +{dl} right +{dr} steps")
+        check("drive forward moves both wheels", dl > 250 and dr > 250, f"left +{dl} right +{dr} steps")
         await d.drive(0.0, 1.0, 0.5)
         await asyncio.sleep(0.15)
         t = d.last()
@@ -170,7 +170,7 @@ async def run():
         check("car disconnect reported to browser", any(s.get("connected") is False for s in d.status[n:]))
 
         # 5. Forward block under 15 cm, reverse and turning still allowed.
-        mock = start_mock(wall=0.30)
+        mock = start_mock(wall=0.22)  # ~2 cm/s at MAX_STEP_RATE 400: reaches 15 cm in ~3.5 s
         await asyncio.sleep(0.5)
         t0 = time.time()
         await d.drive(1.0, 0.0, 5.0)
@@ -183,7 +183,7 @@ async def run():
         d_before = d.last()["dist_cm"]
         await d.drive(-1.0, 0.0, 1.0)
         await asyncio.sleep(0.15)
-        check("reverse allowed when blocked", d.last()["dist_cm"] > d_before + 2, f"{d_before} -> {d.last()['dist_cm']} cm")
+        check("reverse allowed when blocked", d.last()["dist_cm"] > d_before + 1, f"{d_before} -> {d.last()['dist_cm']} cm")
         await d.drive(1.0, 0.0, 1.5)  # back up to the wall
         th = d.last()["mock"]["theta"]
         await d.drive(0.0, 1.0, 1.0)

@@ -127,7 +127,8 @@ since session start.
   `{"type":"drive","v":-1..1,"w":-1..1,"seq":n}` (v forward +, w turn left +) and telemetry
   `{"type":"telemetry","dist_cm","ir_blocked","left_steps","right_steps","yaw_rate","rssi","uptime_ms","blocked","seq"}`.
   Over BLE, every message is a `\n`-terminated line, split into MTU-sized pieces.
-- **Speed:** ~4.5 cm/s at the default `MAX_STEP_RATE 900`. The 28BYJ-48 skips steps above ~1000 half-steps/s.
+- **Speed:** ~2 cm/s at the default `MAX_STEP_RATE 400` (bench: 200 works, 800 skips).
+- **Ultrasonic:** an echo timeout ("nothing in range") counts as clear; a missing sensor ("no_echo") also counts as clear by default (teleop warns). Forward is blocked only on a real reading under 15 cm.
 
 ## Run and test
 ```sh

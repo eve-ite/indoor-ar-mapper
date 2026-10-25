@@ -76,7 +76,7 @@ async function main() {
   await key('keyDown');
   await sleep(1200);
   const s1 = await steps();
-  check('holding W drives the mock forward', s1 - s0 > 500, `left steps ${s0} -> ${s1}`);
+  check('holding W drives the mock forward', s1 - s0 > 250, `left steps ${s0} -> ${s1}`);
   const moving = mock.events.filter((e) => e.event === 'move').length > 0;
   check('mock reported moving', moving);
 

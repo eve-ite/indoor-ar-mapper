@@ -27,7 +27,7 @@ import websockets
 STEPS_PER_REV = 4096  # 28BYJ-48 in half-step mode (gearbox ~1:64)
 WHEEL_DIAMETER_M = 0.065
 TRACK_WIDTH_M = 0.12
-MAX_STEP_RATE = 900.0  # steps/s; the 28BYJ-48 skips steps much above ~1000 half-steps/s at 5 V
+MAX_STEP_RATE = 400.0  # steps/s; our motors: 200 works, 800 skips (see config.h)
 DEADMAN_S = 0.300
 BLOCK_DIST_M = 0.15
 BLOCK_HYST_M = 0.03  # stay blocked until the reading is back above 18 cm
@@ -137,6 +137,7 @@ class Car:
             "rssi": -55,
             "uptime_ms": int((time.monotonic() - self.t0) * 1000),
             "blocked": self.blocked,
+            "us": "ok" if self.ultrasonic() < 4.0 else "clear",
             "mock": {"x": round(self.x, 4), "y": round(self.y, 4), "theta": round(self.theta, 4), "moving": self.moving},
         }
 

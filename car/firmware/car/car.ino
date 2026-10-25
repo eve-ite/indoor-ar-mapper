@@ -19,7 +19,8 @@
 //   out  {"type":"telemetry","dist_cm","ir_blocked","left_steps","right_steps",
 //         "yaw_rate","rssi","uptime_ms","blocked","seq"}
 // Safety: no command for DEADMAN_MS -> stop + coils off; link loss -> immediate stop;
-// forward refused under BLOCK_DIST_M (with hysteresis) or with no ultrasonic reading;
+// forward refused under BLOCK_DIST_M (with hysteresis); an echo timeout ("nothing in range") and,
+// by default, a missing sensor count as clear (telemetry "us" says which; see config.h);
 // reverse and turning always allowed.
 
 #include <AccelStepper.h>
@@ -42,7 +43,8 @@ struct Command {
 };
 enum StopReason : uint8_t { STOP_NONE, STOP_COMMAND, STOP_DEADMAN, STOP_LINK, STOP_BLOCKED };
 struct Sensors {
-  float dist_m = NAN;  // NAN = no valid reading
+  float dist_m = NAN;  // NAN unless us == 0 (US_OK)
+  uint8_t us = 2;      // UsState: 0 ok, 1 clear (nothing in range), 2 no_echo
   bool ir = false;
   bool blocked = false;
   bool moving = false;
@@ -68,16 +70,22 @@ static bool coilsOn = false;
 static bool wasMoving = false;
 
 // Ultrasonic, interrupt-timed so loop() never waits for the echo.
+// An HC-SR04 always raises ECHO right after a trigger and holds it until the echo returns, or for
+// ~38 ms (clones: up to ~200 ms) when nothing is in range. So: rising edges = sensor alive; a pulse
+// longer than US_TIMEOUT_US = nothing in range = clear; no rising edge for US_FAULT_MS = no echo.
+enum UsState : uint8_t { US_OK, US_CLEAR, US_NO_ECHO };
 static volatile uint32_t echoRiseUs = 0, echoPulseUs = 0;
-static volatile bool echoReady = false;
-static uint32_t lastPingMs = 0, lastGoodDistMs = 0;
-static float distM = NAN;
+static volatile bool echoReady = false, echoRose = false;
+static uint32_t lastPingMs = 0, lastRiseMs = 0, lastResultMs = 0;
+static float distM = NAN;  // valid only in US_OK
+static UsState usState = US_NO_ECHO;
 static bool nearSomething = false;
 
 void IRAM_ATTR onEcho() {
   uint32_t now = micros();
   if (digitalRead(US_ECHO)) {
     echoRiseUs = now;
+    echoRose = true;
   } else {
     echoPulseUs = now - echoRiseUs;
     echoReady = true;
@@ -85,15 +93,32 @@ void IRAM_ATTR onEcho() {
 }
 
 static void updateUltrasonic(uint32_t nowMs) {
+  if (echoRose) {
+    echoRose = false;
+    lastRiseMs = nowMs;
+  }
   if (echoReady) {
     echoReady = false;
     uint32_t us = echoPulseUs;
     if (us > 100 && us < US_TIMEOUT_US) {
       distM = us * 343.0e-6f / 2.0f;  // speed of sound ~343 m/s, there and back
-      lastGoodDistMs = nowMs;
+      usState = US_OK;
+    } else {
+      distM = NAN;
+      usState = US_CLEAR;  // long pulse: nothing within ~4.5 m
     }
+    lastResultMs = nowMs;
   }
-  if (nowMs - lastPingMs >= US_PERIOD_MS) {
+  // Echo went high but never came back down before the next pings: also "nothing in range".
+  if (usState == US_OK && nowMs - lastResultMs > 3 * US_PERIOD_MS) {
+    distM = NAN;
+    usState = US_CLEAR;
+  }
+  if (nowMs - lastRiseMs > US_FAULT_MS) {
+    distM = NAN;
+    usState = US_NO_ECHO;
+  }
+  if (nowMs - lastPingMs >= US_PERIOD_MS && !digitalRead(US_ECHO)) {  // don't re-trigger mid-echo
     lastPingMs = nowMs;
     // 10 us trigger pulse. This is the only busy-wait in loop(); at <=1000 steps/s a step is
     // >= 1000 us apart, so 10 us can't make the steppers miss a beat.
@@ -101,7 +126,6 @@ static void updateUltrasonic(uint32_t nowMs) {
     delayMicroseconds(10);
     digitalWrite(US_TRIG, LOW);
   }
-  if (nowMs - lastGoodDistMs > US_FAULT_MS) distM = NAN;
 }
 
 static void setCoils(bool on) {
@@ -168,11 +192,13 @@ void loop() {
 
   // Forward safety stop with hysteresis (otherwise a reading hovering at the threshold lets the
   // car creep forward on every "clear" sample).
-  if (!isnan(distM)) {
+  if (usState == US_OK) {
     if (distM < BLOCK_DIST_M) nearSomething = true;
     else if (distM > BLOCK_DIST_M + BLOCK_HYST_M) nearSomething = false;
+  } else {
+    nearSomething = false;  // "clear" (nothing in range) and "no_echo" both release the block
   }
-  bool blockForward = nearSomething || (US_FAULT_BLOCKS_FORWARD && isnan(distM)) || (IR_BLOCKS_FORWARD && ir);
+  bool blockForward = nearSomething || (US_FAULT_BLOCKS_FORWARD && usState == US_NO_ECHO) || (IR_BLOCKS_FORWARD && ir);
   bool blocked = v > 0 && blockForward;
   if (blocked) v = 0;  // turning and reverse stay allowed
 
@@ -196,6 +222,7 @@ void loop() {
 
   portENTER_CRITICAL(&shareMux);
   sharedSensors.dist_m = distM;
+  sharedSensors.us = usState;
   sharedSensors.ir = ir;
   sharedSensors.blocked = blocked;
   sharedSensors.moving = moving;
@@ -301,6 +328,8 @@ static void sendTelemetry() {
   doc["type"] = "telemetry";
   if (isnan(s.dist_m)) doc["dist_cm"] = nullptr;
   else doc["dist_cm"] = roundf(s.dist_m * 1000.0f) / 10.0f;
+  static const char* const US_NAMES[] = {"ok", "clear", "no_echo"};
+  doc["us"] = US_NAMES[s.us < 3 ? s.us : 2];
   doc["ir_blocked"] = s.ir;
   doc["left_steps"] = s.left_steps;
   doc["right_steps"] = s.right_steps;

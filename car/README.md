@@ -165,5 +165,7 @@ node car/tests/teleop_e2e.mjs                         # real page in headless Ch
 - **Drive commands are latest-wins:** the relay never queues them, so a laggy link can't replay
   old commands.
 
-**Speed:** the 28BYJ-48 is slow. The default `MAX_STEP_RATE 900` half-steps/s with 65 mm wheels
-is about 4.5 cm/s. Above ~1000 it skips steps at 5 V.
+**Speed:** the 28BYJ-48 is slow. The default `MAX_STEP_RATE 400` half-steps/s with 65 mm wheels
+is about 2 cm/s. On our bench, 200 works and 800 skips; raise it in small steps after floor tests.
+
+**Ultrasonic states** (telemetry `us`): `ok` gives a distance, and forward is blocked under 15 cm. `clear` means the echo timed out (nothing within ~4 m), which counts as clear. `no_echo` means no echo pulse at all (sensor unplugged or miswired). By default that also counts as clear, so forward has **no obstacle protection** then, and teleop shows "NO ECHO". Set `US_FAULT_BLOCKS_FORWARD true` in config.h to refuse forward in that case.
