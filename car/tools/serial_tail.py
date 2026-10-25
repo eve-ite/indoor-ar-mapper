@@ -14,6 +14,8 @@ import serial
 
 
 def main():
+    # Boot noise can contain bytes the Windows console encoding can't print.
+    sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("port")
     ap.add_argument("--baud", type=int, default=115200)
