@@ -23,9 +23,9 @@
 #define RIGHT_IN3 17
 #define RIGHT_IN4 18
 
-// The motors are mounted mirrored, so one side turns the "wrong" way for forward. Flip these
+// Set on the real car with bringup_stepper (2026-10-25): both -1 for our wiring/mounting. Flip these
 // (+1 / -1) if a wheel drives backwards during bring-up.
-#define LEFT_DIR (+1)
+#define LEFT_DIR (-1)
 #define RIGHT_DIR (-1)
 
 // ---- HC-SR04 ultrasonic (VCC on the 5 V motor rail). ECHO is 5 V: 1k/2k divider, see WIRING.md ----

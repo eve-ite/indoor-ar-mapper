@@ -17,7 +17,7 @@ differ, so go by the silkscreen labels if they disagree.
 | Left ULN2003 | IN2 | 5 | 5 | |
 | Left ULN2003 | IN3 | 6 | 6 | |
 | Left ULN2003 | IN4 | 7 | 7 | |
-| Right ULN2003 | IN1 | 15 | 8 | mounted mirrored: `RIGHT_DIR -1` in config.h |
+| Right ULN2003 | IN1 | 15 | 8 | directions set on the real car: `LEFT_DIR -1`, `RIGHT_DIR -1` |
 | Right ULN2003 | IN2 | 16 | 9 | |
 | Right ULN2003 | IN3 | 17 | 10 | |
 | Right ULN2003 | IN4 | 18 | 11 | |
