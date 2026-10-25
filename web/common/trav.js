@@ -19,6 +19,8 @@ export const TRAV_DEFAULTS = {
   freeL: -0.5, // log-odds below this = floor seen
   seenCost: 4, // per-cell cost of floor-seen cells relative to walked ones
   recencySlack: 15, // s: observations closer together than this count as the same pass
+  transientSpan: 2, // s: obstacle hits at a spot all within this, then seen through 2+ times = a passer-by
+  transientClears: 2,
 };
 
 // Max-filter of per-cell times over a disk (cells without a time stay at -Infinity).
@@ -64,7 +66,14 @@ export function traversability(grid, opts = {}) {
   const obsT = grid.obsT || NEVER, clearT = grid.clearT || NEVER, walkedT = grid.walkedT || NEVER;
   // Obstacles a later pass saw straight through (moved away).
   const cleared = new Uint8Array(w * h);
-  for (let i = 0; i < cleared.length; i++) if (obs[i] && clearT[i] > obsT[i] + o.recencySlack) cleared[i] = 1;
+  const obsFirstT = grid.obsFirstT, clearN = grid.clearN;
+  for (let i = 0; i < cleared.length; i++) {
+    if (!obs[i]) continue;
+    if (clearT[i] > obsT[i] + o.recencySlack) cleared[i] = 1; // moved away (later visit)
+    // People walking past: only seen briefly, then seen through. Tables are hit over many seconds
+    // as you walk by, so they never qualify.
+    else if (obsFirstT && obsT[i] - obsFirstT[i] < o.transientSpan && clearN[i] >= o.transientClears) cleared[i] = 1;
+  }
   // Obstacle: enough obstacle hits in the 3x3 neighbourhood (depth hits are sparse per 5 cm cell),
   // regardless of floor seen in the same cells (floor under a table top).
   const occ = new Uint8Array(w * h);

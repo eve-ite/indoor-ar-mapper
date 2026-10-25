@@ -76,6 +76,11 @@ export function buildGrid(frames, opts = {}) {
   const obsT = new Float32Array(w * h).fill(NEVER);
   const clearT = new Float32Array(w * h).fill(NEVER);
   const walkedT = new Float32Array(w * h).fill(NEVER);
+  // People: obsFirstT = first obstacle hit (with obsT, how long it was seen), clearN = rays that
+  // went through it at its height at least 1 s after its last hit (it moved away).
+  const obsFirstT = new Float32Array(w * h).fill(NEVER);
+  const clearN = new Uint8Array(w * h);
+  const obsLow = new Float32Array(w * h).fill(99); // lowest obstacle hit per cell (m above floor)
   const obsTop = new Float32Array(w * h); // highest obstacle hit per cell (m above floor), for 3D blocks
 
   // Bresenham from (x0,z0) to (x1,z1): every cell before the endpoint is free.
@@ -90,7 +95,11 @@ export function buildGrid(frames, opts = {}) {
       bump(x0, z0, y <= o.clearBelow ? o.lFree : o.lFree * o.overheadFree);
       if (inside(x0, z0)) {
         const c = z0 * w + x0;
-        if (obsTop[c] > 0 && Math.abs(y - obsTop[c]) <= o.clearBand) clearT[c] = t; // went through it: gone
+        // Through it at the height it was seen (top): proof a table etc. has gone (newest wins).
+        if (obsTop[c] > 0 && Math.abs(y - obsTop[c]) <= o.clearBand) clearT[c] = t;
+        // Through it anywhere in the height range it was seen: counts toward "a passer-by" (only
+        // used for obstacles seen briefly, so a table's open space under its top can't fool it).
+        if (obsTop[c] > 0 && y >= obsLow[c] - 0.1 && y <= obsTop[c] + 0.1 && t > obsT[c] + 1 && clearN[c] < 255) clearN[c]++;
       }
       const e2 = 2 * err;
       if (e2 >= dz) { err += dz; x0 += sx; }
@@ -126,8 +135,11 @@ export function buildGrid(frames, opts = {}) {
           if (inside(cx, cz)) {
             const c = cz * w + cx;
             obs[c] = Math.min(65535, obs[c] + 1);
+            if (obsFirstT[c] === NEVER) obsFirstT[c] = f.t;
             obsT[c] = f.t;
+            clearN[c] = 0; // seen again: any earlier see-through doesn't count
             obsTop[c] = Math.max(obsTop[c], Math.min(hitH, o.wallMax));
+            obsLow[c] = Math.min(obsLow[c], hitH);
           }
           counts.wall++;
         } else {
@@ -162,7 +174,7 @@ export function buildGrid(frames, opts = {}) {
   }
   if (frames.length === 1) stamp(frames[0].p[0], frames[0].p[2], frames[0].t);
 
-  return { w, h, minX, minZ, cell: o.cell, L, obs, obsTop, obsT, clearT, walked, walkedT, counts, floors, opts: o };
+  return { w, h, minX, minZ, cell: o.cell, L, obs, obsTop, obsT, obsFirstT, clearT, clearN, walked, walkedT, counts, floors, opts: o };
 }
 
 export function floorPerFrame(frames) {

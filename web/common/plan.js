@@ -6,6 +6,7 @@ export const PLAN_DEFAULTS = {
   wallMinTop: 1.0, // m: anything seen this high is structure (tables/chairs are ~0.45-0.8 m)
   longRun: 2.0, // m: or a long, thin run (a wall seen only low down, e.g. from car height)
   maxFill: 0.35, // ...whose bounding box is mostly empty (thin), unlike a table top
+  tallMinLength: 0.8, // m: a tall thing must also be this long to be a wall (a person is ~0.4 m)
 };
 
 // occ: obstacle mask (trav.occ). Returns Uint8Array: 1 = structure, 0 = furniture/none.
@@ -41,7 +42,7 @@ export function wallMask(grid, occ, opts = {}) {
     // 90th percentile so one noisy depth sample doesn't promote a table.
     const tops = comp.map((i) => obsTop[i] || 0).sort((a, b) => a - b);
     const robustTop = tops[Math.floor(tops.length * 0.9)] ?? top;
-    const isWall = robustTop >= o.wallMinTop || (long >= o.longRun && fill <= o.maxFill);
+    const isWall = (robustTop >= o.wallMinTop && long >= o.tallMinLength) || (long >= o.longRun && fill <= o.maxFill);
     if (isWall) for (const i of comp) out[i] = 1;
   }
   return out;

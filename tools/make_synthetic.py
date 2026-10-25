@@ -50,7 +50,23 @@ def ray_box_enter(o, d, lo, hi):
     return tmin if tmin <= tmax else math.inf
 
 
-def depth_samples(o, yaw, rng):
+PERSON = ((-1.8, -1.0), (1.8, -1.0), 15.0, 17.5)  # crosses in front of the scanner (s)
+
+
+def person_box(t):
+    """--person: a 0.4 x 1.7 x 0.4 m person crossing the room, or None when not in view."""
+    if "--person" not in sys.argv:
+        return None
+    (ax, az), (bx, bz), t0, t1 = PERSON
+    if not t0 <= t <= t1:
+        return None
+    f = (t - t0) / (t1 - t0)
+    x, z = ax + (bx - ax) * f, az + (bz - az) * f
+    return ((x - 0.2, 0.0, z - 0.2), (x + 0.2, 1.7, z + 0.2))
+
+
+def depth_samples(o, yaw, rng, t=0.0):
+    person = person_box(t)
     """Depth-map samples: a 16-column grid over ~60 deg, rows below the horizon, 2% range noise.
     --depth-max (default 5 m, the old app) and --rows-up (the app's extra row just above centre)."""
     out = []
@@ -62,6 +78,8 @@ def depth_samples(o, yaw, rng):
             b = math.radians(p_deg)
             d = (-math.sin(a) * math.cos(b), math.sin(b), -math.cos(a) * math.cos(b))
             tt = min(ray_box_exit(o, d, *ROOM), ray_box_enter(o, d, *TABLE))
+            if person:
+                tt = min(tt, ray_box_enter(o, d, *person))
             if not 0.3 < tt < max_range:
                 continue
             tt *= 1 + rng.gauss(0, DEPTH_NOISE)
@@ -86,6 +104,8 @@ SHORT_LOOP = [(0, 0), (0, -1.3), (0.9, -1.0), (0.6, -0.3), (0, 0)]
 
 
 def waypoints():
+    if arg("--path") == "revisit":  # the normal loop, then walk back past the middle of the room
+        return [(0, 0), (0, -1.5), (-1.2, -2.5), (-1.2, -3.8), (0.8, -3.8), (1.7, -3.2), (1.7, -1.8), (0.8, -0.5), (0, 0), (0, -1.8), (0.9, -1.4)]
     if arg("--path") == "short":
         return SHORT_LOOP
     if arg("--path") == "hall":  # straight down the middle, no looking around needed
@@ -223,7 +243,7 @@ def main():
             if depth:
                 # Like the real S23: plane hit-test only finds the floor; depth sees everything.
                 frame["pts"] = [h for h in pts if h[1] < 0.05]
-                frame["dpts"] = depth_samples(o, yaw, rng)
+                frame["dpts"] = depth_samples(o, yaw, rng, t)
             lines.append(frame)
             if photos and (last_kf is None or math.hypot(px - last_kf[0], pz - last_kf[1]) >= KF_EVERY):
                 q = quat_yaw_pitch(yaw, KF_PITCH)
