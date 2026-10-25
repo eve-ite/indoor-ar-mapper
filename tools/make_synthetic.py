@@ -3,7 +3,9 @@
 Mimics the scan app: local-floor (Y up), phone at ~1.4 m, fan of hit-test rays
 (yaw +-35 deg, pitch 0/-10/-20/-30 deg), random hit dropouts and pose noise.
 
-  python tools/make_synthetic.py scans/synthetic.jsonl [--truncate] [--depth]
+  python tools/make_synthetic.py scans/synthetic.jsonl [--truncate] [--depth] [--car]
+
+--car: the phone rides on the robot car (M4): ~0.2 m up, 0.1 m/s, steady (no bob or looking around).
 """
 
 import json
@@ -50,6 +52,8 @@ def ray_box_enter(o, d, lo, hi):
     return tmin if tmin <= tmax else math.inf
 
 
+CAR_PHONE_Y = 0.2  # m: camera height with the phone in the car's clamp
+
 PERSON = ((-1.8, -1.0), (1.8, -1.0), 15.0, 17.5)  # crosses in front of the scanner (s)
 
 
@@ -72,6 +76,10 @@ def depth_samples(o, yaw, rng, t=0.0):
     out = []
     max_range = float(arg("--depth-max", 5))
     rows = ((3,) if "--rows-up" in sys.argv else ()) + (-5, -14, -23, -32, -41)
+    if "--car" in sys.argv:
+        # An upright mount: the app's image rows 0.3-0.8 (depth.js) are about +16..-23 deg. The
+        # handheld rows above all look down and would mostly hit the floor from 20 cm up.
+        rows = (16, 8, 0, -8, -16, -23)
     for p_deg in rows:
         for i in range(16):
             a = yaw + math.radians(-30 + 60 * i / 15)
@@ -185,6 +193,7 @@ def main():
     truncate = "--truncate" in sys.argv
     photos = "--photos" in sys.argv
     depth = "--depth" in sys.argv or photos
+    car = "--car" in sys.argv
     if photos:
         import os
 
@@ -204,10 +213,11 @@ def main():
             "created": "2026-10-24T10:00:00Z",
             "app_version": "0.1",
             "fan": {"rays": [[y, p] for p in PITCHES for y in YAWS], "origin": "viewer"},
+            **({"platform": "car"} if car else {}),
         }
     ]
-    t, speed = float(arg("--t0", 0)), 0.5
-    sway = float(arg("--sway", 0.25))  # rad: how much the user looks around
+    t, speed = float(arg("--t0", 0)), 0.1 if car else 0.5
+    sway = float(arg("--sway", 0 if car else 0.25))  # rad: how much the user looks around
     wps = waypoints()
     for (x0, z0), (x1, z1) in zip(wps, wps[1:]):
         seg = math.hypot(x1 - x0, z1 - z0)
@@ -216,7 +226,7 @@ def main():
         for i in range(steps):
             s = i / steps
             px, pz = x0 + (x1 - x0) * s, z0 + (z1 - z0) * s
-            py = 1.4 + 0.02 * math.sin(t * 6)  # walking bob
+            py = CAR_PHONE_Y + 0.003 * math.sin(t * 6) if car else 1.4 + 0.02 * math.sin(t * 6)  # walking bob / car vibration
             yaw = heading + sway * math.sin(t * 0.9)  # looking around a bit
             o = (px, py, pz)
             pts = []

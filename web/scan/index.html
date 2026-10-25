@@ -57,6 +57,10 @@
     #hint.warn { color: var(--warn); }
     #hint.bad { color: var(--bad); }
     #hint small { display: block; font-weight: 400; font-size: 15px; color: var(--fg); margin-top: 4px; }
+    /* On the car the phone is read from standing height, ~1.5 m away. */
+    body.car.in-ar #hint { font-size: 34px; padding: 18px; }
+    body.car.in-ar #hint small { font-size: 20px; }
+    body.car.in-ar #status { font-size: 13px; }
     #msg { color: var(--muted); }
     #msg.warn { color: var(--warn); }
     #msg.bad { color: var(--bad); }
@@ -143,6 +147,9 @@
       <b>Before Start:</b> stand over the corner of the tape L, phone <b>upright</b> (camera looking
       straight ahead, not at the floor), top edge pointing along the long arm. The map's origin and
       "forward" are wherever the phone is when you tap Start.<br />
+      <b>On the car:</b> tick "Mounted on the car", clamp the phone upright with the camera ahead and
+      ≥15 cm above the floor, put the car so the <b>phone</b> is over the mark, tap Start, then drive
+      slowly from the laptop (teleop in Chrome/Edge). Turn gently and keep scans to 1–2 min.<br />
       <b>While scanning:</b> walk slowly along the walls with the phone angled toward them, turn in
       curves rather than spinning on the spot, and follow the hint at the top. Scans save on the
       phone as you go; upload whenever the network cooperates.
@@ -152,6 +159,10 @@
       <label class="toggle">
         <input id="depthToggle" type="checkbox" />
         <span>Depth lidar <small>(beta: sees tables &amp; clutter, Android only)</small></span>
+      </label>
+      <label class="toggle">
+        <input id="carToggle" type="checkbox" />
+        <span>Mounted on the car <small>(M4: hints for driving, bigger text; drive from the laptop's teleop page)</small></span>
       </label>
       <label class="toggle">
         <input id="kfToggle" type="checkbox" />

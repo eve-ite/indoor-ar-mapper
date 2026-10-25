@@ -210,21 +210,27 @@ A **map** is one location, made of one or more scans.
   legacy chains (`chain-<root>`), and `scans/maps.json` (maps made in the viewer, plus renames).
   `POST /api/maps` creates a map; `PUT /api/maps/{id}` renames or edits one.
 
-## Navigation (M5, branch `nav-m5`)
+## Navigation (M5)
 
 `<tunnel>/nav/` (or `http://localhost:8000/nav/`). Pick a **map**, a **start mark** and where to **go**.
 
-- **Start marks:** the map's start marker (the tape L where its first scan began) and the **end of
-  every scan** (where a Continue scan would start). A mark within 2 m of a room label is named after
-  it. The default start is the newest scan's end.
+- **Start marks:**
+  - every **room label**, listed first: stand where you labelled it, facing the way you were walking
+    then ("Room 304 · facing toward 341"; `?start=304`);
+  - the map's start marker (the tape L where its first scan began);
+  - the **end of every scan** (where a Continue scan would start). A mark within 2 m of a room
+    label is named after it.
+
+  The default start is the first room.
   - **Demo spot:** tape a mark there, scan from the map to the demo spot (Continue), and stop on the
     mark. It's then a start mark that's already lined up with the rest of the map.
 - **Destinations:** room labels (from scans and the viewer), the start marks, or tap the 2D map to
   drop a pin.
-- **2D preview / fallback:** route on a top-down map plus steps ("Walk 10 m, then turn slight
-  left"). Phones without WebXR AR (iPhones) get just this.
+- **2D preview / fallback:** route on a top-down map plus steps ("Walk 39 m, then turn slight
+  left"). Routes are straightened across open floor, so a hallway is one straight walk, and bends
+  under 35° aren't announced. Phones without WebXR AR (iPhones) get just this.
 - **AR:** stand on the start mark facing the way the scan faced, move the phone until the floor is
-  found, and tap **I'm on the mark**. The session is lined up with the map exactly like a Continue
+  found, and tap **I'm here**. The session is lined up with the map exactly like a Continue
   scan (`sessionToMap` in `web/nav/navcore.js` uses the same maths as `mergeMap`). Then:
   - chevrons on the floor for the next 12 m, a red goal pole, and a banner ("Turn left in 4 m")
     whose arrow points at the route 2.5 m ahead;
@@ -232,7 +238,7 @@ A **map** is one location, made of one or more scans.
     where you are (full A*, at most every 3 s);
   - **nudges**: turn the arrows ±2° or shift them ±20 cm if they don't line up with the corridor.
 - **Walks join the map** ("Add this walk to the map", on by default): the walk is recorded like a
-  scan (hit-test fan at 10 Hz; depth only with `?depth=1`) from the moment you tap I'm on the mark.
+  scan (hit-test fan at 10 Hz; depth only with `?depth=1`) from the moment you tap I'm here.
   - From an end mark it's an ordinary Continue scan of that scan, with the nudge saved as
     `continues_nudge`.
   - From the map start marker it's written straight in map coordinates.
@@ -245,3 +251,42 @@ A **map** is one location, made of one or more scans.
   real venue chain, turns) and `node tools/test_nav_ar.mjs` (three.js arrow maths).
 - **Not built yet:** live re-routing around moved furniture (see the section above), auto-align of
   the live session to the map, and a minimap in AR.
+
+## Car scans (M4)
+
+The phone rides on the car and runs the normal scan app; you drive from the laptop over Bluetooth.
+
+- **Scan app:** Settings → **Mounted on the car** (or `?car=1`). The header records
+  `"platform": "car"` (handheld scans: `"handheld"`). The viewer and nav still pick the RC-car
+  profile from the phone height (< 0.7 m).
+  - Hints are for driving and are big enough to read from standing height: "Drive forward slowly",
+    "Turn slower" (> 35°/s), "Mount tilted" (> 10°), "Phone too low" (< 12 cm above the floor),
+    "Floor not found", "Swing left/right" toward far walls, "No walls seen lately".
+- **Mount:** phone **upright**, camera straight ahead, **≥ 15 cm** above the floor, and offset from
+  the turning axis (per the backlog). Upright matters a lot: from 20 cm up a camera tilted down
+  like a handheld phone sees mostly floor. In the synthetic test that's 33% of the walls mapped,
+  against 93% upright (`tools/test_car_scan.mjs`).
+- **Driving (laptop):** teleop needs no server, just localhost in Chrome/Edge (Brave blocks Web
+  Bluetooth). From the main checkout:
+  ```powershell
+  & "C:\Users\derpf\Documents\indoor-ar-mapper\server\.venv\Scripts\python.exe" -m http.server 8001 --bind 127.0.0.1 -d "C:\Users\derpf\Documents\indoor-ar-mapper\car\teleop"
+  & "C:\Program Files\Google\Chrome\Application\chrome.exe" http://127.0.0.1:8001/
+  ```
+  (or `http://localhost:8000/teleop/` if master's server is running).
+- **Procedure:**
+  1. Tape the mark. Put the car down so the **phone** (not the car's centre) is over it, facing
+     along the long arm.
+  2. Tap Start on the phone, connect teleop on the laptop, and drive forward slowly until the hint
+     says the floor is found.
+  3. Drive slowly (the car does ~4 cm/s by default), turn gently, and keep scans to 1–2 min.
+     There's no ultrasonic, so watch the car.
+  4. Stop. Mark the floor under the phone. Next scan: put the phone back over that mark, same
+     heading, then **Continue**. Car and handheld scans chain together (floors are matched at
+     each handover).
+  5. Upload as usual. The viewer's profile shows "RC car".
+- Test: `python tools/make_synthetic.py scans/car_depth.jsonl --depth --car --id car_depth`,
+  `python tools/make_synthetic.py scans/synthetic_depth.jsonl --depth`, then
+  `node tools/test_car_scan.mjs` (car profile detected, walls ≥ 60% mapped, the table blocks
+  routing, a route around it exists).
+  - `--car` puts the phone 0.2 m up at 0.1 m/s, using the app's real depth rows for an upright
+    phone (+16° to −23°) rather than the handheld generator's downward ones.
