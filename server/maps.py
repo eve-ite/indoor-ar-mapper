@@ -101,8 +101,11 @@ def list_maps() -> list:
             own = [s for s, h in headers.items() if isinstance(h.get("map"), dict) and h["map"].get("id") == mid]
             e["scans"] = [s for s in r["scans"] if s in headers] + own
             e["links"] = {k: v for k, v in (r.get("links") or {}).items() if k in headers and v in headers}
-        elif mid in maps and r.get("name"):
-            maps[mid]["name"] = r["name"]  # rename of an app/chain map
+        elif mid in maps:
+            if r.get("name"):
+                maps[mid]["name"] = r["name"]  # rename of an app/chain map
+            # re-linking an app/chain map's scans, e.g. skipping a scan that never uploaded
+            maps[mid]["links"].update({k: v for k, v in (r.get("links") or {}).items() if k in headers and v in headers})
         if mid in maps and r.get("name"):
             maps[mid]["name"] = r["name"]
 
