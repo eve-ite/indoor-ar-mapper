@@ -3,7 +3,7 @@
 import { readFileSync, existsSync } from 'fs';
 import { parseScan } from '../web/common/jsonl.js';
 import { mergeMap, transformFrame, apply, invert } from '../web/common/chain.js';
-import { buildNavMap, sessionToMap, planRoute, turnList, progressOn, nextTurn, stepsText, startMarks } from '../web/nav/navcore.js';
+import { buildNavMap, sessionToMap, planRoute, turnList, progressOn, nextTurn, stepsText, startMarks, roomMarks } from '../web/nav/navcore.js';
 
 let failed = 0;
 const check = (name, ok, info = '') => {
@@ -130,6 +130,51 @@ check('session -> map lands on the mark (all marks)', worst < 0.005, `max error 
   check('a route that doubles back stays on the near leg', back.seg === 0, `seg ${back.seg}`);
   const slight = turnList([[0, 0], [0, -5], [-4, -9]]).turns[0].kind;
   check('a ~27° bend is not a turn, 45° is slight', turnList([[0, 0], [0, -5], [-1, -7]]).turns.length === 1 && slight === 'slight-left', slight);
+}
+
+// ---- 5. room starts: heading = the way you walked when you labelled it ----
+{
+  // Walk 10 m along -X (heading +90°), pause at a door to label "201" (standing still, phone
+  // turned to the door), carry on; label "202" further along.
+  const frames = [];
+  let t = 0;
+  for (let x = 0; x >= -10; x -= 0.05, t += 0.1) {
+    frames.push({ t, p: [x, 1.4, 0], q: [0, Math.sin(Math.PI / 4), 0, Math.cos(Math.PI / 4)] });
+    if (Math.abs(x + 4) < 0.025) for (let k = 0; k < 30; k++, t += 0.1) frames.push({ t, p: [x, 1.4, 0], q: [0, 0, 0, 1] }); // looking at the door (-Z)
+  }
+  const tAt = (x) => frames.find((f) => Math.abs(f.p[0] - x) < 0.03).t + 1;
+  const labels = [{ name: '201', t: tAt(-4), p: [-4, 0, 0] }, { name: '202', t: tAt(-8), p: [-8, 0, 0] }];
+  const rooms = roomMarks(frames, labels);
+  const r201 = rooms.find((m) => m.name === 'Room 201');
+  const deg = (r201.yaw * 180) / Math.PI;
+  check('room start faces the walking direction, not the door', Math.abs(deg - 90) < 3, `${deg.toFixed(1)}° (want 90)`);
+  check('room start says what to face', r201.hint === 'facing toward 202', r201.hint);
+  check('last room: what is behind you', rooms.find((m) => m.name === 'Room 202').hint === 'with 201 behind you');
+}
+
+// ---- 6. hallways go straight (real "aic" map, if it's here) ----
+{
+  const AIC = ['387415cfa118', '16bb9c7a094d', '163f61a1ec5e', 'afccfb5defe7'];
+  if (AIC.every((id) => existsSync(`scans/${id}.jsonl`))) {
+    const sc = AIC.map((id) => parseScan(readFileSync(`scans/${id}.jsonl`, 'utf8')));
+    const nz = Object.fromEntries(sc.filter((s) => s.header?.continues_nudge).map((s) => [s.header.session_id, s.header.continues_nudge]));
+    const mg = mergeMap(sc, { nudges: nz, links: { afccfb5defe7: '163f61a1ec5e' } });
+    const nv = buildNavMap(sc, mg);
+    const rooms = nv.marks.filter((m) => m.kind === 'room');
+    check('aic: every room label is a start', rooms.length === nv.labels.length, `${rooms.length} rooms`);
+    const L = (n) => nv.labels.find((l) => l.name === n);
+    const r = planRoute(nv, [L('304').p[0], L('304').p[2]], [L('339').p[0], L('339').p[2]]);
+    const ti = turnList(r.pts);
+    check('aic: 304 -> 339 is one straight walk', ti.turns.length === 1, stepsText(ti, '339').join(' / '));
+    let unreachable = 0;
+    for (const a of rooms) for (const b of nv.labels) if (planRoute(nv, a.p, [b.p[0], b.p[2]]).error) unreachable++;
+    check('aic: every room reaches every room', !unreachable, `${unreachable} pairs unreachable`);
+    // Lining up at a room start lands the session on that room.
+    const m = rooms[0];
+    const T = sessionToMap(m, { p: [5, 1.4, 5], q: [0, 0, 0, 1] });
+    const at = apply(T, 5, 5);
+    check('aic: lining up at a room lands on it', Math.hypot(at[0] - m.p[0], at[1] - m.p[1]) < 1e-6);
+  } else console.log('     (aic scans not here: skipped the real-hallway checks)');
 }
 
 console.log(failed ? `FAIL (${failed})` : 'PASS');

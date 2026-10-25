@@ -123,18 +123,21 @@ async function openMap(id) {
   }
   console.log(`nav map ${nav.grid.w}x${nav.grid.h} in ${(performance.now() - t0).toFixed(0)} ms`);
   map2d.setMap(nav);
-  ui.startPick.replaceChildren(...nav.marks.map((mk) => Object.assign(document.createElement('option'), { value: mk.id, textContent: mk.name })));
-  // Default start: ?start=<mark id>, else the newest end mark (where the latest scan stopped:
-  // usually the demo spot), else the map start marker.
+  ui.startPick.replaceChildren(
+    ...nav.marks.map((mk) => Object.assign(document.createElement('option'), { value: mk.id, textContent: mk.hint ? `${mk.name} · ${mk.hint}` : mk.name })),
+  );
+  // Default start: ?start=<mark id or room name, e.g. 304>, else the first room, else the newest
+  // end mark (where the latest scan stopped), else the map start marker.
   const ws = params.get('start');
-  ui.startPick.value = ws && nav.marks.some((mk) => mk.id === ws) ? ws : nav.marks.at(-1).id;
+  const want = ws && nav.marks.find((mk) => mk.id === ws || mk.name === ws || mk.name === `Room ${ws}`);
+  ui.startPick.value = (want || nav.marks.find((mk) => mk.kind === 'room') || nav.marks.at(-1)).id;
   renderDestPick(params.get('dest'));
   pickDest();
 }
 
 function destinations() {
   const out = nav.labels.map((l, i) => ({ key: `label:${i}`, name: l.name, p: [l.p[0], l.p[2]] }));
-  for (const mk of nav.marks) out.push({ key: `mark:${mk.id}`, name: mk.name, p: mk.p });
+  for (const mk of nav.marks) if (mk.kind !== 'room') out.push({ key: `mark:${mk.id}`, name: mk.name, p: mk.p }); // rooms are listed as labels already
   if (pin) out.push({ key: 'pin', name: pin.name, p: pin.p });
   return out;
 }
@@ -143,8 +146,10 @@ function renderDestPick(select) {
   const list = destinations();
   ui.destPick.replaceChildren(...list.map((d) => Object.assign(document.createElement('option'), { value: d.key, textContent: d.name })));
   const byName = select && list.find((d) => d.key === select || d.name === select);
-  // Default: the first room label, else the map start marker (unless that's where we start).
-  ui.destPick.value = byName ? byName.key : list.find((d) => d.key.startsWith('label:'))?.key ?? list.find((d) => d.key !== `mark:${ui.startPick.value}`)?.key ?? list[0]?.key;
+  // Default: a room other than the one we start at, else any other place.
+  const from = startMark();
+  const away = (d) => !from || Math.hypot(d.p[0] - from.p[0], d.p[1] - from.p[1]) > 2;
+  ui.destPick.value = byName ? byName.key : list.find((d) => d.key.startsWith('label:') && away(d))?.key ?? list.find(away)?.key ?? list[0]?.key;
 }
 
 const startMark = () => nav?.marks.find((mk) => mk.id === ui.startPick.value) || null;
@@ -170,7 +175,7 @@ function makeRoute(from, d) {
     return null;
   }
   const ti = turnList(r.pts);
-  ui.routeInfo.textContent = `${Math.round(r.length)} m · ${r.walkedPct}% on walked paths · ~${Math.max(1, Math.round(r.length / 1.1 / 60))} min`;
+  ui.routeInfo.textContent = `${Math.round(r.length)} m · ~${Math.max(1, Math.round(r.length / 1.1 / 60))} min walk`;
   return { ...r, ...ti, dest: d };
 }
 
@@ -342,7 +347,12 @@ async function startAr() {
 }
 
 function alignBanner() {
-  banner('warn', 'Stand on the start mark', `${ar.mark.name}. Phone upright, facing the way the scan faced there. Move it side to side until the floor is found, then tap "I'm on the mark".`);
+  const mk = ar.mark;
+  if (mk.kind === 'room') {
+    banner('warn', `Stand at ${mk.name}, ${mk.hint}`, `Where you stood when you labelled it, phone upright. Move it side to side until the floor is found, then tap "I'm here".`);
+  } else {
+    banner('warn', 'Stand on the start mark', `${mk.name}. Phone upright, facing the way the scan faced there. Move it side to side until the floor is found, then tap "I'm here".`);
+  }
 }
 
 function banner(kind, text, detail = '') {

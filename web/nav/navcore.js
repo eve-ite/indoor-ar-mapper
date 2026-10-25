@@ -12,9 +12,10 @@ import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
 export const NAV = {
   labelNear: 2.0, // m: a mark this close to a room label is named after it
   snapR: 1.5, // m: a start/goal in a blocked cell snaps to open floor this close
-  turnDeg: 30, // heading change that counts as a turn
-  slightDeg: 55, // below this a turn is "slight"
-  mergeTurnS: 1.2, // m: route corners closer than this merge into one turn
+  turnDeg: 35, // heading change that counts as a turn (smaller bends: "keep going")
+  slightDeg: 60, // below this a turn is "slight"
+  mergeTurnS: 2.0, // m: route corners closer than this merge into one turn
+  dirSpan: 1.0, // m of walked path either side of a room label that gives its "facing" direction
   offRoute: 1.5, // m from the route...
   offRouteS: 2.5, // ...for this long = off route, re-plan
   arrive: 1.0, // m from the goal = arrived
@@ -55,7 +56,80 @@ export function startMarks(scans, merged, labels = []) {
     }
     if (best) m.name = `${best.l.name} (${m.kind === 'start' ? 'map start marker' : 'end of scan ' + m.scan})`;
   }
-  return marks;
+  return [...roomMarks(merged.frames, labels), ...marks];
+}
+
+// Every room label is a start too: stand where you stood when you labelled it, facing the way
+// you were walking then. The heading comes from the walked path either side of the label (not
+// the phone's yaw: people turn to read the door sign). Rooms first, in number order.
+// These marks are in map coordinates already (T = identity).
+export function roomMarks(frames, labels) {
+  const out = [];
+  const timed = labels.filter((l) => Number.isFinite(l.t)).sort((a, b) => a.t - b.t);
+  labels.forEach((l, k) => {
+    const dir = travelHeading(frames, l);
+    if (dir === null) return;
+    const at = [l.p[0], l.p[2]];
+    // "facing toward <the next room you labelled after it>", if that room is roughly ahead.
+    const ahead = (o) => {
+      const d = dist(at, [o.p[0], o.p[2]]);
+      const off = Math.abs(wrap(headingOf(at, [o.p[0], o.p[2]]) - dir));
+      return d > 1.5 && off < Math.PI / 4;
+    };
+    const behind = (o) => {
+      const d = dist(at, [o.p[0], o.p[2]]);
+      const off = Math.abs(wrap(headingOf(at, [o.p[0], o.p[2]]) - dir));
+      return d > 1.5 && off > (3 * Math.PI) / 4;
+    };
+    const next = timed.find((o) => o.t > (l.t ?? Infinity) && o.name !== l.name && ahead(o)) || labels.find((o) => o !== l && o.name !== l.name && ahead(o));
+    const prev = !next && ([...timed].reverse().find((o) => o.t < (l.t ?? -Infinity) && o.name !== l.name && behind(o)) || labels.find((o) => o !== l && o.name !== l.name && behind(o)));
+    out.push({
+      id: `room:${k}:${l.name}`,
+      kind: 'room',
+      scan: l.scan ?? null,
+      T: ID,
+      local: { p: [l.p[0], l.p[1], l.p[2]], q: [0, Math.sin(dir / 2), 0, Math.cos(dir / 2)] },
+      p: at,
+      yaw: dir,
+      name: `Room ${l.name}`,
+      hint: next ? `facing toward ${next.name}` : prev ? `with ${prev.name} behind you` : 'facing the way you walked when you labelled it',
+    });
+  });
+  const num = (m) => parseFloat(m.name.replace(/^Room /, ''));
+  return out.sort((a, b) => (num(a) - num(b)) || a.name.localeCompare(b.name));
+}
+
+// Walking direction at a label: from the path ~dirSpan m before to ~dirSpan m after the moment
+// it was labelled (or the nearest path point, for labels added in the viewer). null if unknown.
+function travelHeading(frames, l) {
+  if (!frames.length) return null;
+  let i0 = 0;
+  if (Number.isFinite(l.t)) {
+    let best = Infinity;
+    frames.forEach((f, i) => {
+      if (Math.abs(f.t - l.t) < best) (best = Math.abs(f.t - l.t)), (i0 = i);
+    });
+  } else {
+    let best = Infinity;
+    frames.forEach((f, i) => {
+      const d = dist([f.p[0], f.p[2]], [l.p[0], l.p[2]]);
+      if (d < best) (best = d), (i0 = i);
+    });
+  }
+  const xz = (i) => [frames[i].p[0], frames[i].p[2]];
+  // Walk out along the path, stopping at gaps between scans (time jumps or tracking jumps).
+  const reach = (step) => {
+    let i = i0;
+    while (dist(xz(i), xz(i0)) < NAV.dirSpan) {
+      const j = i + step;
+      if (j < 0 || j >= frames.length || Math.abs(frames[j].t - frames[i].t) > 2 || dist(xz(j), xz(i)) > 1) break;
+      i = j;
+    }
+    return i;
+  };
+  const a = xz(reach(-1)), b = xz(reach(1));
+  if (dist(a, b) < 0.5) return yawOf(frames[i0].q); // stood still the whole time: the phone's heading
+  return headingOf(a, b);
 }
 
 // Session -> map transform once the walker stands on `mark` with the viewer at sessPose {p, q}.
@@ -128,16 +202,47 @@ export function planRoute(nav, from, to, cost = nav.trav.cost) {
     length += d;
     if (trav.tier[cells[k]] === TRAV.WALKED) walked += d;
   }
-  const pts = simplifyPath(cells, cost, grid.w).map((i) => cellCenter(grid, i));
+  const pts = straighten(simplifyPath(cells, cost, grid.w), cost, grid.w).map((i) => cellCenter(grid, i));
   // Start exactly where the walker is when that's open floor (no first hop to a cell centre).
   if (a === cellOf(grid, from)) pts[0] = [from[0], from[1]];
   if (pts.length < 2) pts.push([...pts[0]]); // already there: still a (zero-length) segment
   return {
     pts,
-    length,
+    length: pts.reduce((s, p, k) => (k ? s + dist(pts[k - 1], p) : 0), 0), // the straightened route walked
+    gridLength: length,
     walkedPct: Math.round((100 * walked) / (length || 1)),
     snapped: { from: dist(from, cellCenter(grid, a)), to: dist(to, cellCenter(grid, b)) },
   };
+}
+
+// Hallways go straight: shortcut between route corners whenever every cell on the straight line
+// is passable (open floor, already kept a body radius from obstacles). simplifyPath only cuts
+// across equally cheap cells, so its route follows every sway of the walk that mapped it.
+export function straighten(corners, cost, w) {
+  if (!corners || corners.length < 3) return corners;
+  const clear = (a, b) => {
+    let x0 = a % w, z0 = (a / w) | 0;
+    const x1 = b % w, z1 = (b / w) | 0;
+    const dx = Math.abs(x1 - x0), dz = -Math.abs(z1 - z0);
+    const sx = x0 < x1 ? 1 : -1, sz = z0 < z1 ? 1 : -1;
+    let err = dx + dz;
+    for (;;) {
+      if (!isFinite(cost[z0 * w + x0])) return false;
+      if (x0 === x1 && z0 === z1) return true;
+      const e2 = 2 * err;
+      if (e2 >= dz) { err += dz; x0 += sx; }
+      if (e2 <= dx) { err += dx; z0 += sz; }
+    }
+  };
+  const out = [corners[0]];
+  let i = 0;
+  while (i < corners.length - 1) {
+    let j = corners.length - 1;
+    while (j > i + 1 && !clear(corners[i], corners[j])) j--;
+    out.push(corners[j]);
+    i = j;
+  }
+  return out;
 }
 
 // ---- turn-by-turn ----
