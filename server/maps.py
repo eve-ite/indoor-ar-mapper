@@ -97,7 +97,9 @@ def list_maps() -> list:
             continue
         if r.get("scans") is not None:
             e = entry(mid, r.get("name") or mid, "viewer")
-            e["scans"] = [s for s in r["scans"] if s in headers]
+            # the viewer's list, plus later scans that name this map themselves (e.g. nav walks)
+            own = [s for s, h in headers.items() if isinstance(h.get("map"), dict) and h["map"].get("id") == mid]
+            e["scans"] = [s for s in r["scans"] if s in headers] + own
             e["links"] = {k: v for k, v in (r.get("links") or {}).items() if k in headers and v in headers}
         elif mid in maps and r.get("name"):
             maps[mid]["name"] = r["name"]  # rename of an app/chain map

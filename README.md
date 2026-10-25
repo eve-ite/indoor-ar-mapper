@@ -209,3 +209,39 @@ A **map** is one location, made of one or more scans.
 - **Server** (`server/maps.py`): `GET /api/maps` merges three sources: maps declared by scans,
   legacy chains (`chain-<root>`), and `scans/maps.json` (maps made in the viewer, plus renames).
   `POST /api/maps` creates a map; `PUT /api/maps/{id}` renames or edits one.
+
+## Navigation (M5, branch `nav-m5`)
+
+`<tunnel>/nav/` (or `http://localhost:8000/nav/`). Pick a **map**, a **start mark** and where to **go**.
+
+- **Start marks:** the map's start marker (the tape L where its first scan began) and the **end of
+  every scan** (where a Continue scan would start). A mark within 2 m of a room label is named after
+  it. The default start is the newest scan's end.
+  - **Demo spot:** tape a mark there, scan from the map to the demo spot (Continue), and stop on the
+    mark. It's then a start mark that's already lined up with the rest of the map.
+- **Destinations:** room labels (from scans and the viewer), the start marks, or tap the 2D map to
+  drop a pin.
+- **2D preview / fallback:** route on a top-down map plus steps ("Walk 10 m, then turn slight
+  left"). Phones without WebXR AR (iPhones) get just this.
+- **AR:** stand on the start mark facing the way the scan faced, move the phone until the floor is
+  found, and tap **I'm on the mark**. The session is lined up with the map exactly like a Continue
+  scan (`sessionToMap` in `web/nav/navcore.js` uses the same maths as `mergeMap`). Then:
+  - chevrons on the floor for the next 12 m, a red goal pole, and a banner ("Turn left in 4 m")
+    whose arrow points at the route 2.5 m ahead;
+  - "Back to the arrows" when you're more than 1.5 m off; after 2.5 s off-route it re-plans from
+    where you are (full A*, at most every 3 s);
+  - **nudges**: turn the arrows ±2° or shift them ±20 cm if they don't line up with the corridor.
+- **Walks join the map** ("Add this walk to the map", on by default): the walk is recorded like a
+  scan (hit-test fan at 10 Hz; depth only with `?depth=1`) from the moment you tap I'm on the mark.
+  - From an end mark it's an ordinary Continue scan of that scan, with the nudge saved as
+    `continues_nudge`.
+  - From the map start marker it's written straight in map coordinates.
+  - Either way the header has `"nav": {mark, dest, coords}` and the map's id. It's saved on the
+    phone (same store as the scan app) and uploaded at Stop. Nav walks don't add start marks.
+  - `server/maps.py`: maps made in the viewer now also include later scans that name them.
+- URL: `?map=<id>&start=<mark id>&dest=<label name>` (for a QR code), `?sim=1` lists simulated maps,
+  `?profile=person|car`, `?depth=1`, `?device=S23`.
+- Tests: `node tools/test_nav.mjs` (lining up on every mark, walks joining the map, routing on the
+  real venue chain, turns) and `node tools/test_nav_ar.mjs` (three.js arrow maths).
+- **Not built yet:** live re-routing around moved furniture (see the section above), auto-align of
+  the live session to the map, and a minimap in AR.
