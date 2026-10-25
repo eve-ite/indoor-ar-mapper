@@ -5,6 +5,7 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
 import { TRAV } from '../common/trav.js';
 import { close, dropSpecks } from './mapstyle.js';
 import { wallMask } from '../common/plan.js';
+import { poseMatrix } from '../common/keyframes.js';
 
 const PLAN_WALL_H = 1.2; // m: uniform wall height in floor-plan mode (reads like a plan, not a skyline)
 
@@ -40,8 +41,10 @@ export class View3D {
     this.mapGroup = new THREE.Group();
     this.routeGroup = new THREE.Group();
     this.labelGroup = new THREE.Group(); // room labels: name tag on a post
-    this.scene.add(this.mapGroup, this.routeGroup, this.labelGroup);
+    this.photoGroup = new THREE.Group(); // keyframe frustums + thumbnails
+    this.scene.add(this.mapGroup, this.routeGroup, this.labelGroup, this.photoGroup);
     this.floorPlan = false;
+    this.floorColors = null; // RGBA per grid cell from photos, or null
 
     this.onPick = null;
     this.pickFloor();
@@ -113,7 +116,7 @@ export class View3D {
       this.built = { trav, theme: this.themeVersion };
     }
     this.grid = grid;
-    if (!this.built[key]) this.built[key] = this.buildMap(grid, trav);
+    if (!this.built[key]) this.built[key] = this.buildMap(grid, trav, key === 'plan');
     this.mapGroup.remove(...this.mapGroup.children); // detach only: built groups are reused
     this.mapGroup.add(this.built[key]);
     this.blockCount = this.built[key].userData.blockCount;
@@ -123,11 +126,12 @@ export class View3D {
     const built = this.built;
     const idle = window.requestIdleCallback || ((f) => setTimeout(f, 300));
     idle(() => {
-      if (this.built === built && !built[other]) built[other] = this.buildMap(grid, trav);
+      if (this.built === built && !built[other]) built[other] = this.buildMap(grid, trav, other === 'plan');
     });
   }
 
-  buildMap(grid, trav) {
+  // plan: build the floor-plan version (explicit, so idle pre-builds don't use the current mode).
+  buildMap(grid, trav, plan) {
     const group = new THREE.Group();
     const { w, h, cell, minX, minZ } = grid;
 
@@ -144,9 +148,14 @@ export class View3D {
     if (this.cache?.trav !== trav) this.cache = { trav };
     const cached = (key, make) => (this.cache[key] ??= make());
     const known = cached('known', () => close(Uint8Array.from(trav.tier, (t, i) => (t !== TRAV.BLOCKED || trav.occ[i] ? 1 : 0)), w, h, 2));
+    const photo = this.floorColors && this.floorColors.length === w * h * 4 ? this.floorColors : null;
     for (let i = 0; i < w * h; i++) {
+      if (photo && photo[i * 4 + 3]) {
+        img.data.set(photo.subarray(i * 4, i * 4 + 4), i * 4); // what the camera saw
+        continue;
+      }
       if (!known[i]) continue;
-      img.data.set(trav.tier[i] === TRAV.WALKED && !this.floorPlan ? walkRGB : floorRGB, i * 4);
+      img.data.set(trav.tier[i] === TRAV.WALKED && !plan ? walkRGB : floorRGB, i * 4);
       img.data[i * 4 + 3] = 255;
     }
     tctx.putImageData(img, 0, 0);
@@ -163,7 +172,7 @@ export class View3D {
     group.add(floor);
 
     // Blocks: obstacle mask cleaned up, then one box per BLOCK x BLOCK group of cells.
-    const mask = this.floorPlan
+    const mask = plan
       ? cached('walls', () => dropSpecks(close(wallMask(grid, trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS))
       : cached('obstacles', () => dropSpecks(close(Uint8Array.from(trav.occ), w, h, 3), w, h, MIN_OBSTACLE_CELLS));
     const blocks = [];
@@ -222,7 +231,7 @@ export class View3D {
     const high = new THREE.Color(this.color('--map-obst-edge'));
     const c = new THREE.Color();
     blocks.forEach((b, k) => {
-      const hgt = this.floorPlan ? PLAN_WALL_H : Math.max(MIN_BLOCK_H, b.smoothTop);
+      const hgt = plan ? PLAN_WALL_H : Math.max(MIN_BLOCK_H, b.smoothTop);
       m.makeScale(size * 0.98, hgt, size * 0.98);
       m.setPosition(minX + (b.bx + BLOCK / 2) * cell, 0, minZ + (b.bz + BLOCK / 2) * cell);
       mesh.setMatrixAt(k, m);
@@ -287,6 +296,60 @@ export class View3D {
       post.castShadow = true;
       this.labelGroup.add(tag, post);
     }
+    this.render();
+  }
+
+  // RGBA per grid cell (from floorcolor.js) or null; takes effect on the next setMap().
+  setFloorColors(rgba) {
+    if (rgba === this.floorColors) return;
+    this.floorColors = rgba;
+    // The cached map builds have the old floor baked in: drop them (setMap rebuilds).
+    for (const g of [this.built?.plan, this.built?.normal]) if (g) this.clear(g);
+    this.built = null;
+  }
+
+  // Keyframes as small camera frustums at their capture pose, with the photo on the far plane.
+  // urlFor(kf) -> image URL, or null when the photo isn't available (e.g. a dropped local file).
+  setKeyframes(keyframes, urlFor) {
+    this.clear(this.photoGroup);
+    if (!keyframes?.length) return this.render();
+    const D = 0.22; // m: frustum depth
+    const lineMat = new THREE.LineBasicMaterial({ color: this.color('--map-route') });
+    const loader = new THREE.TextureLoader();
+    for (const kf of keyframes) {
+      const K = kf.intrinsics;
+      const hw = (K.w / 2 / K.fx) * D, hh = (K.h / 2 / K.fy) * D; // half-size of the far plane
+      // Corners in camera space (camera looks down -Z), offset for an off-centre principal point.
+      const ox = ((K.w / 2 - K.cx) / K.fx) * D, oy = ((K.cy - K.h / 2) / K.fy) * D;
+      const c = [[-hw, hh], [hw, hh], [hw, -hh], [-hw, -hh]].map(([x, y]) => new THREE.Vector3(x + ox, y + oy, -D));
+      const o = new THREE.Vector3();
+      const pts = [o, c[0], o, c[1], o, c[2], o, c[3], c[0], c[1], c[1], c[2], c[2], c[3], c[3], c[0]];
+      const g = new THREE.Group();
+      g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), lineMat));
+      const url = urlFor(kf);
+      if (url) {
+        const quad = new THREE.Mesh(
+          new THREE.PlaneGeometry(2 * hw, 2 * hh),
+          new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.92 }),
+        );
+        quad.position.set(ox, oy, -D);
+        loader.load(url, (tex) => {
+          tex.colorSpace = THREE.SRGBColorSpace;
+          quad.material.map = tex;
+          quad.material.needsUpdate = true;
+          this.render();
+        });
+        g.add(quad);
+      }
+      g.matrixAutoUpdate = false;
+      g.matrix.fromArray(poseMatrix(kf.p, kf.q));
+      this.photoGroup.add(g);
+    }
+    this.render();
+  }
+
+  showKeyframes(on) {
+    this.photoGroup.visible = on;
     this.render();
   }
 

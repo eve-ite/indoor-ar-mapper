@@ -4,6 +4,7 @@ import { DEFAULTS, PROFILES, buildGrid, classifyHeight, detectProfile, hitMargin
 import { TRAV, astar, simplifyPath, traversability } from '../common/trav.js';
 import { View3D } from './view3d.js';
 import { mergeMap } from '../common/chain.js';
+import { floorColors } from './floorcolor.js';
 
 const params = new URLSearchParams(location.search);
 const SERVER = (params.get('server') || '').replace(/\/$/, '');
@@ -17,7 +18,7 @@ const PROFILE_KEYS = ['floorMax', 'wallMin', 'wallMax', 'clearBelow', 'bodyRadiu
 const ROUTE_COLOR = '#facc15';
 const POINT_COLORS = { floor: '#3b82f6', wall: '#f97316', other: '#9ca3af' };
 
-let scan = null; // { name, header, frames, skipped, stats }
+let scan = null; // { name, header, frames, keyframes, labels, skipped, serverId }
 let serverScans = []; // summaries from /api/scans (incl. continues/chain links, simulated)
 let serverMaps = []; // from /api/maps: [{ id, name, scans, links, simulated, updated }]
 let kind = 'real'; // 'real' | 'sim': real and simulated data are listed completely separately
@@ -26,6 +27,8 @@ const texts = new Map(); // scan id -> JSONL text (cache)
 let labelKey = null; // server id whose viewer-added labels apply (the scan, or the map)
 let viewerLabels = []; // labels added in the viewer: [{ name, p: [x, y, z] }] in labelKey's coordinates
 let addingLabel = false;
+let kfImages = null; // Map "scan/img" -> ImageData, loaded once per scan/map for the photo floor
+let photoFloor = null; // RGBA per grid cell, or null
 let grid = null;
 let gridImage = null;
 let trav = null;
@@ -112,7 +115,7 @@ async function loadFromServer(id) {
     currentMap = null;
     $('chain').hidden = true;
     labelKey = id;
-    setScan(id, text);
+    setScan(id, text, id);
     loadViewerLabels();
     renderLists();
   } catch (err) {
@@ -134,8 +137,8 @@ function loadFile(file) {
   reader.readAsText(file);
 }
 
-function setScan(name, text) {
-  setParsed(name, parseScan(text));
+function setScan(name, text, serverId = null) {
+  setParsed(name, { ...parseScan(text), serverId });
 }
 
 // keepView: re-render in place (used while nudging a chain) instead of resetting route + camera.
@@ -152,7 +155,14 @@ function setParsed(name, parsed, { keepView = false } = {}) {
     $('err').textContent = `${name}: no frames found${parsed.header ? '' : ' (and no header)'}`;
     return;
   }
-  scan = { name, ...parsed };
+  scan = { name, ...parsed }; // parsed.serverId is set for a single scan from the server
+  if (!keepView) {
+    kfImages = null;
+    photoFloor = null;
+    setupPhotos();
+  }
+  // keepView (nudging a map): same photos, new positions; rebuild() re-projects the photo floor.
+  else syncPhotos3d();
   detected = detectProfile(scan.frames);
   if (!keepView) {
     route = { a: null, b: null, path: null, info: '' };
@@ -337,6 +347,7 @@ function rebuild() {
   grid = buildGrid(scan.frames, opts());
   trav = grid ? traversability(grid) : null;
   gridImage = travImage = null; // 2D debug images are built on demand (drawDebug), not in Map mode
+  if (photoFloor) recolorFloor(); // grid changed: re-project (images are cached)
   if (view3d && grid) view3d.setMap(grid, trav);
   computeRoute();
   renderStats();
@@ -517,10 +528,104 @@ function ensure3d() {
     view3d = new View3D($('view3d'), cssColor);
     view3d.onPick = (x, z) => addRoutePoint([x, z]);
     view3d.setFloorPlan($('floorPlan').checked);
+    view3d.setFloorColors(photoFloor);
     if (grid) view3d.setMap(grid, trav);
     view3d.setLabels(allLabels());
+    syncPhotos3d();
   }
   return view3d;
+}
+
+// ---- camera keyframes (textures branch) ----
+// A photo's own scan: maps tag every keyframe with the scan it came from (names repeat across scans).
+const kfScan = (kf) => kf.scan || scan?.serverId || null;
+const kfKey = (kf) => `${kfScan(kf)}/${kf.img}`;
+const kfUrl = (kf) => (kfScan(kf) ? `${SERVER}/api/scans/${encodeURIComponent(kfScan(kf))}/kf/${kf.img}` : null);
+
+function setupPhotos() {
+  const n = scan.keyframes?.length || 0;
+  $('photos').hidden = !n;
+  if (!n) {
+    view3d?.setKeyframes(null);
+    view3d?.setFloorColors(null);
+    return;
+  }
+  $('photoFloor').checked = false;
+  const loadable = scan.keyframes.some((kf) => kfScan(kf));
+  $('photoNote').textContent = loadable
+    ? `${n} photos${currentMap ? ' in this map' : ' in this scan'}`
+    : `${n} photos listed, but images only load for scans opened from the server list`;
+  $('photoFloor').disabled = !loadable;
+  const zip = $('nerfLink');
+  zip.hidden = !scan.serverId; // export is per scan (open a single scan to download it)
+  if (scan.serverId) zip.href = `${SERVER}/api/scans/${encodeURIComponent(scan.serverId)}/nerfstudio.zip`;
+  syncPhotos3d();
+}
+
+function syncPhotos3d() {
+  if (!view3d || !scan) return;
+  view3d.setKeyframes(scan.keyframes, kfUrl);
+  view3d.showKeyframes($('showPhotos').checked);
+}
+
+async function loadKfImages() {
+  if (kfImages) return kfImages;
+  const out = new Map();
+  let done = 0;
+  const queue = [...scan.keyframes];
+  const worker = async () => {
+    for (let kf = queue.shift(); kf; kf = queue.shift()) {
+      try {
+        const res = await fetch(kfUrl(kf));
+        if (!res.ok) throw new Error(res.status);
+        const bmp = await createImageBitmap(await res.blob());
+        const c = new OffscreenCanvas(bmp.width, bmp.height);
+        const cx = c.getContext('2d');
+        cx.drawImage(bmp, 0, 0);
+        out.set(kfKey(kf), cx.getImageData(0, 0, bmp.width, bmp.height));
+      } catch (err) {
+        console.warn('photo', kf.img, err);
+      }
+      $('photoNote').textContent = `loading photos ${++done}/${scan.keyframes.length}…`;
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  kfImages = out;
+  return out;
+}
+
+// Floor height at time t: the tracked floor of the nearest recorded frame.
+function floorAt(t) {
+  const f = scan.frames;
+  let lo = 0, hi = f.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (f[mid].t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return grid.floors[lo];
+}
+
+function recolorFloor() {
+  const t0 = performance.now();
+  const kfs = scan.keyframes.map((kf) => ({ ...kf, image: kfImages.get(kfKey(kf)) }));
+  photoFloor = floorColors(grid, trav, kfs, floorAt);
+  let n = 0;
+  for (let i = 3; i < photoFloor.length; i += 4) if (photoFloor[i]) n++;
+  $('photoNote').textContent = `floor coloured from ${kfImages.size} photos: ${(n * grid.cell * grid.cell).toFixed(1)} m² (${(performance.now() - t0).toFixed(0)} ms)`;
+  view3d?.setFloorColors(photoFloor);
+}
+
+async function togglePhotoFloor() {
+  if ($('photoFloor').checked) {
+    await loadKfImages();
+    recolorFloor();
+  } else {
+    photoFloor = null;
+    view3d?.setFloorColors(null);
+    $('photoNote').textContent = `${scan.keyframes.length} photos in this scan`;
+  }
+  if (view3d && grid) view3d.setMap(grid, trav);
 }
 
 // Route in world coords: string-pulled cell path, exact clicked endpoints (the tube smooths it).
@@ -844,6 +949,8 @@ $('floorPlan').onchange = () => {
     if (grid) view3d.setMap(grid, trav);
   }
 };
+$('showPhotos').onchange = () => view3d?.showKeyframes($('showPhotos').checked);
+$('photoFloor').onchange = () => togglePhotoFloor().catch((e) => ($('photoNote').textContent = e.message));
 
 // ---- Map / Debug mode (remembered) ----
 function setMode(m) {
