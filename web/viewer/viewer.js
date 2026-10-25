@@ -145,6 +145,7 @@ function setScan(name, text, serverId = null) {
 const isSimulated = (h) => !!h && (h.simulated || h.device === 'synthetic');
 
 function setParsed(name, parsed, { keepView = false } = {}) {
+  if (!keepView) closeWalk();
   $('err').textContent = '';
   const chip = $('dataKind');
   const sim = isSimulated(parsed.header);
@@ -562,6 +563,72 @@ function setupPhotos() {
   syncPhotos3d();
 }
 
+// ---- photo walk: step through the photos in the order they were taken (street-view style) ----
+let walk = null; // { list: keyframes sorted by time, i }
+
+function startWalk() {
+  const list = (scan?.keyframes || []).filter((kf) => kfUrl(kf)).slice().sort((a, b) => a.t - b.t);
+  if (!list.length) return ($('photoNote').textContent = 'No loadable photos (open the scan or map from the server list).');
+  if (mode !== 'map') setMode('map');
+  walk = { list, i: 0 };
+  $('walk').hidden = false;
+  showWalk();
+}
+
+function closeWalk() {
+  if (!walk) return;
+  walk = null;
+  $('walk').hidden = true;
+  view3d?.highlightKeyframe(null);
+}
+
+function nearestLabel(kf) {
+  let best = null;
+  for (const l of allLabels()) {
+    const d = Math.hypot(l.p[0] - kf.p[0], l.p[2] - kf.p[2]);
+    if (d < 6 && (!best || d < best.d)) best = { name: l.name, d };
+  }
+  return best;
+}
+
+function showWalk() {
+  const { list, i } = walk;
+  const kf = list[i];
+  $('walkImg').src = kfUrl(kf);
+  for (const k of [list[i + 1], list[i - 1]]) if (k) new Image().src = kfUrl(k); // prefetch neighbours
+  const near = nearestLabel(kf);
+  $('walkCaption').innerHTML = '';
+  $('walkCaption').append(near ? `near ${near.name} (${near.d.toFixed(1)} m)` : 'photo');
+  const sub = document.createElement('small');
+  sub.textContent = `${i + 1} / ${list.length}${kf.scan ? ' · scan ' + kf.scan.slice(0, 6) : ''} · ← → to step, click the map to jump`;
+  $('walkCaption').append(sub);
+  $('walkPrev').disabled = i === 0;
+  $('walkNext').disabled = i === list.length - 1;
+  ensure3d();
+  view3d.highlightKeyframe(kf);
+  view3d.followPose(kf.p, kf.q);
+}
+
+function stepWalk(d) {
+  if (!walk) return;
+  const i = Math.max(0, Math.min(walk.list.length - 1, walk.i + d));
+  if (i !== walk.i) {
+    walk.i = i;
+    showWalk();
+  }
+}
+
+// Click on the map during a walk: jump to the photo taken closest to that spot.
+function walkToNearest([x, z]) {
+  let best = 0, bd = Infinity;
+  walk.list.forEach((kf, k) => {
+    const d = Math.hypot(kf.p[0] - x, kf.p[2] - z);
+    if (d < bd) (bd = d), (best = k);
+  });
+  walk.i = best;
+  showWalk();
+}
+
 function syncPhotos3d() {
   if (!view3d || !scan) return;
   view3d.setKeyframes(scan.keyframes, kfUrl);
@@ -645,6 +712,7 @@ function sync3dRoute() {
 function addRoutePoint(pt) {
   if (!grid) return;
   if (addingLabel) return placeLabel(pt);
+  if (walk) return walkToNearest(pt);
   if (!route.a || route.b) route = { a: pt, b: null, path: null, info: '' };
   else route.b = pt;
   computeRoute();
@@ -950,6 +1018,18 @@ $('floorPlan').onchange = () => {
   }
 };
 $('showPhotos').onchange = () => view3d?.showKeyframes($('showPhotos').checked);
+$('walkStart').onclick = startWalk;
+$('walkPrev').onclick = () => stepWalk(-1);
+$('walkNext').onclick = () => stepWalk(1);
+$('walkClose').onclick = closeWalk;
+document.addEventListener('keydown', (e) => {
+  if (!walk || /INPUT|SELECT|TEXTAREA/.test(document.activeElement?.tagName)) return;
+  if (e.key === 'ArrowRight') stepWalk(1);
+  else if (e.key === 'ArrowLeft') stepWalk(-1);
+  else if (e.key === 'Escape') closeWalk();
+  else return;
+  e.preventDefault();
+});
 $('photoFloor').onchange = () => togglePhotoFloor().catch((e) => ($('photoNote').textContent = e.message));
 
 // ---- Map / Debug mode (remembered) ----
