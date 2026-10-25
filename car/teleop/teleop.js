@@ -95,9 +95,13 @@ $('bleBtn').addEventListener('click', async () => {
 
 // Live top-speed tuning: the car clamps it to 50..1200 and remembers it.
 $('rateBtn').addEventListener('click', () => {
-  const r = parseFloat($('rate').value);
-  if (!(r > 0)) return;
-  const line = JSON.stringify({ type: 'set', max_step_rate: r });
+  const msg = { type: 'set' };
+  for (const [id, key] of [['rate', 'max_step_rate'], ['accel', 'accel'], ['decel', 'decel']]) {
+    const x = parseFloat($(id).value);
+    if (x > 0) msg[key] = x;
+  }
+  if (Object.keys(msg).length === 1) return;
+  const line = JSON.stringify(msg);
   if (ble.connected) ble.send(line);
   else if (ws?.readyState === WebSocket.OPEN) ws.send(line);
 });
@@ -219,8 +223,12 @@ setInterval(renderPills, 500);
 function renderTelemetry(t) {
   if (t.max_step_rate != null) {
     const mps = t.steps_per_rev ? (t.max_step_rate / t.steps_per_rev) * Math.PI * 0.065 : null;
-    $('rateNow').textContent = `car: ${t.max_step_rate} steps/s${mps ? ` ≈ ${(mps * 100).toFixed(1)} cm/s` : ''}`;
+    $('rateNow').textContent =
+      `car: ${t.step_mode ?? ''} step, ${t.max_step_rate} steps/s${mps ? ` ≈ ${(mps * 100).toFixed(1)} cm/s` : ''}` +
+      (t.accel != null ? `, accel ${t.accel}, decel ${t.decel}` : '');
     if (!$('rate').value) $('rate').value = t.max_step_rate;
+    if (!$('accel').value && t.accel != null) $('accel').value = t.accel;
+    if (!$('decel').value && t.decel != null) $('decel').value = t.decel;
   }
   const blocked = t.blocked ?? t.dist_cm < 15;
   // us: "ok" (distance), "clear" (nothing in range), "no_echo" (sensor missing: no forward protection)

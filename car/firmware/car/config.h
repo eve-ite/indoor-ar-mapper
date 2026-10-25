@@ -59,7 +59,16 @@
 // saved on the car. Raise it until the wheels start skipping under load, then back off ~20%.
 #define MAX_STEP_RATE 400.0f
 #define MAX_STEP_RATE_LIMIT 1200.0f  // hard cap for the live setting
-#define ACCEL_STEPS 800.0f           // steps/s^2 when speeding up (0 -> 400 in 0.5 s); stops are immediate
+// Ramps (steps/s^2), also live-tunable ({"type":"set","accel":N,"decel":M}) and saved on the car.
+// A stepper can run far above its pull-in rate (the speed it can start at) if it gets there
+// gradually, so a gentle ACCEL is what makes high MAX_STEP_RATE possible.
+// AccelStepper's own setAcceleration() only works in position mode (moveTo/run); we drive in
+// velocity mode (runSpeed), so the firmware ramps the speed itself, same profile.
+#define ACCEL_STEPS 400.0f   // speeding up: 0 -> 400 in 1 s, 0 -> 1000 in 2.5 s
+#define DECEL_STEPS 1200.0f  // normal stops (keys released / STOP / slower command)
+// Safety stops (deadman, link lost, forward blocked) do NOT ramp: they stop at once, so the
+// deadman still stops the motors within DEADMAN_MS of the last command.
+#define RAMP_LIMIT 5000.0f   // cap for the live accel/decel settings
 #define WHEEL_DIAMETER_M 0.065f
 #define TRACK_WIDTH_M 0.12f
 

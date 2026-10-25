@@ -58,6 +58,8 @@ static Command sharedCmd;
 static Sensors sharedSensors;
 static volatile bool linkUp = false;
 static volatile float maxStepRate = MAX_STEP_RATE;  // live-tunable top speed (steps/s), saved in NVS
+static volatile float accelRate = ACCEL_STEPS;      // live-tunable ramps (steps/s^2), saved in NVS
+static volatile float decelRate = DECEL_STEPS;
 static BleLink ble;
 
 void startNetwork();
@@ -143,10 +145,23 @@ static void setCoils(bool on) {
 
 // Speed up gradually (the 28BYJ-48 stalls on a sudden jump to full speed), but slow down and
 // stop instantly: at these speeds there is no momentum to worry about, and stops must be quick.
-static float approach(float cur, float target, float maxDelta) {
-  if (cur != 0 && (cur > 0) != (target > 0)) return 0;  // reversing: stop first, then ramp the other way
-  if (fabsf(target) <= fabsf(cur)) return target;
-  return cur + constrain(target - cur, -maxDelta, maxDelta);
+// Normal motion: speed up by at most `up` and slow down by at most `down` (steps/s this pass).
+// Reversing goes through zero (slow down first, then ramp up the other way).
+static float ramp(float cur, float target, float up, float down) {
+  bool reversing = cur != 0 && target != 0 && (cur > 0) != (target > 0);
+  if (reversing || fabsf(target) < fabsf(cur)) {
+    float slower = fabsf(cur) - down;
+    if (reversing) return slower <= 0 ? 0 : copysignf(slower, cur);
+    return fabsf(target) >= slower ? target : copysignf(slower, cur);
+  }
+  return cur + constrain(target - cur, -up, up);
+}
+
+// Safety stop (deadman, link lost, forward blocked): drop to the safe target at once, no ramp.
+// Never speeds anything up, so turning while forward is blocked still ramps normally afterwards.
+static float cut(float cur, float target) {
+  if (cur != 0 && (cur > 0) != (target > 0)) return 0;
+  return fabsf(target) < fabsf(cur) ? target : cur;
 }
 
 void setup() {
@@ -208,8 +223,13 @@ void loop() {
   float k = fmaxf(1.0f, fmaxf(fabsf(l), fabsf(r)));
   float rate = maxStepRate;
   float lt = rate * l / k, rt = rate * r / k;
-  leftRate = approach(leftRate, lt, ACCEL_STEPS * dt);
-  rightRate = approach(rightRate, rt, ACCEL_STEPS * dt);
+  if (!link || expired || blocked) {  // safety: no deceleration ramp, stop now
+    leftRate = cut(leftRate, lt);
+    rightRate = cut(rightRate, rt);
+  }
+  float up = accelRate * dt, down = decelRate * dt;
+  leftRate = ramp(leftRate, lt, up, down);
+  rightRate = ramp(rightRate, rt, up, down);
 
   bool moving = leftRate != 0 || rightRate != 0;
   setCoils(moving);
@@ -264,8 +284,17 @@ static void handleMessage(const char* text, size_t length) {
       float r = constrain(doc["max_step_rate"].as<float>(), 50.0f, MAX_STEP_RATE_LIMIT);
       maxStepRate = r;
       prefs.putFloat("rate", r);
-      Serial.printf("%8lu [set] max_step_rate=%.0f steps/s (%s step)\n", millis(), r, FULL_STEP ? "full" : "half");
     }
+    if (doc["accel"].is<float>()) {
+      accelRate = constrain(doc["accel"].as<float>(), 50.0f, RAMP_LIMIT);
+      prefs.putFloat("accel", accelRate);
+    }
+    if (doc["decel"].is<float>()) {
+      decelRate = constrain(doc["decel"].as<float>(), 50.0f, RAMP_LIMIT);
+      prefs.putFloat("decel", decelRate);
+    }
+    Serial.printf("%8lu [set] max_step_rate=%.0f accel=%.0f decel=%.0f (%s step)\n", millis(), maxStepRate, accelRate,
+                  decelRate, FULL_STEP ? "full" : "half");
     return;
   }
   if (doc["type"] != "drive") return;
@@ -353,6 +382,9 @@ static void sendTelemetry() {
   doc["blocked"] = s.blocked;
   doc["seq"] = seq;
   doc["max_step_rate"] = (int)maxStepRate;
+  doc["accel"] = (int)accelRate;
+  doc["decel"] = (int)decelRate;
+  doc["step_mode"] = FULL_STEP ? "full" : "half";
   doc["steps_per_rev"] = STEPS_PER_REV;
   String out;
   serializeJson(doc, out);
@@ -408,6 +440,8 @@ static void loadConfig() {
   cfgPort = prefs.getUShort("port", SERVER_PORT);
   cfgTls = prefs.getBool("tls", SERVER_TLS);
   maxStepRate = constrain(prefs.getFloat("rate", MAX_STEP_RATE), 50.0f, MAX_STEP_RATE_LIMIT);
+  accelRate = constrain(prefs.getFloat("accel", ACCEL_STEPS), 50.0f, RAMP_LIMIT);
+  decelRate = constrain(prefs.getFloat("decel", DECEL_STEPS), 50.0f, RAMP_LIMIT);
 }
 
 static void printConfig() {

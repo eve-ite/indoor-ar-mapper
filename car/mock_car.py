@@ -56,6 +56,7 @@ class Car:
         self.blocked = False
         self.near = False  # something within the block distance (with hysteresis)
         self.max_rate = MAX_STEP_RATE  # live-tunable via {"type":"set","max_step_rate":N}
+        self.ramps = {"accel": 400.0, "decel": 1200.0}
         self.yaw_rate = 0.0
         self.t0 = time.monotonic()
 
@@ -140,6 +141,9 @@ class Car:
             "blocked": self.blocked,
             "us": "ok" if self.ultrasonic() < 4.0 else "clear",
             "max_step_rate": int(self.max_rate),
+            "accel": int(self.ramps["accel"]),
+            "decel": int(self.ramps["decel"]),
+            "step_mode": "full",
             "steps_per_rev": STEPS_PER_REV,
             "mock": {"x": round(self.x, 4), "y": round(self.y, 4), "theta": round(self.theta, 4), "moving": self.moving},
         }
@@ -171,9 +175,14 @@ async def session(car: Car, url: str) -> None:
                     msg = json.loads(text)
                 except json.JSONDecodeError:
                     continue
-                if msg.get("type") == "set" and "max_step_rate" in msg:
-                    car.max_rate = max(50.0, min(1200.0, float(msg["max_step_rate"])))
-                    emit("set", max_step_rate=car.max_rate)
+                if msg.get("type") == "set":
+                    # Mirrors the firmware: top speed + ramps (the mock itself does not ramp).
+                    if "max_step_rate" in msg:
+                        car.max_rate = max(50.0, min(1200.0, float(msg["max_step_rate"])))
+                    for k in ("accel", "decel"):
+                        if k in msg:
+                            car.ramps[k] = max(50.0, min(5000.0, float(msg[k])))
+                    emit("set", max_step_rate=car.max_rate, **car.ramps)
                 elif msg.get("type") == "drive":
                     v, w = float(msg.get("v", 0)), float(msg.get("w", 0))
                     if v == 0 and w == 0:
